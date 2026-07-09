@@ -76,6 +76,7 @@ CHANNEL_IDS = {
     "content": os.environ.get("CHANNEL_ID_CONTENT"),
     "ads": os.environ.get("CHANNEL_ID_ADS"),
     "approvals": os.environ.get("CHANNEL_ID_APPROVALS"),
+    "ops": os.environ.get("CHANNEL_ID_OPS"),
 }
 
 # --- Personas ---------------------------------------------------------------
