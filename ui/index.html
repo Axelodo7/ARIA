@@ -1,0 +1,356 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500&amp;display=swap" rel="stylesheet">
+<style>
+  html, body { margin: 0; padding: 0; background: #070a14; }
+  a { color: #2fb8ff; text-decoration: none; }
+  a:hover { color: #7fdfff; }
+  @keyframes aria-spin { to { transform: rotate(360deg); } }
+  @keyframes aria-spin-rev { to { transform: rotate(-360deg); } }
+  @keyframes aria-pulse-slow { 0%,100% { transform: scale(1); opacity: .88; } 50% { transform: scale(1.055); opacity: 1; } }
+  @keyframes aria-pulse-fast { 0%,100% { transform: scale(1); opacity: .92; } 50% { transform: scale(1.085); opacity: 1; } }
+  @keyframes aria-wave { 0% { transform: scale(1.0); } 11% { transform: scale(1.11); } 23% { transform: scale(1.02); } 37% { transform: scale(1.14); } 50% { transform: scale(0.99); } 63% { transform: scale(1.09); } 77% { transform: scale(1.03); } 88% { transform: scale(1.12); } 100% { transform: scale(1.0); } }
+  @keyframes aria-node-breathe { 0%,100% { opacity: .5; } 50% { opacity: 1; } }
+  @keyframes aria-fade-in { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
+</style>
+</helmet>
+<div style="--accent: {{ accent }}; position: relative; width: 100%; min-height: 100vh; background: radial-gradient(ellipse 120% 90% at 50% 42%, #0c1424 0%, #070a14 60%, #04060d 100%); font-family: 'JetBrains Mono', ui-monospace, monospace; color: #2fb8ff; overflow: hidden; display: flex; flex-direction: column; align-items: center; justify-content: center;">
+
+  <div style="position: absolute; top: 34px; left: 40px; font-size: 11px; letter-spacing: .34em; font-weight: 400; color: rgba(180,236,255,.95);">A R I A</div>
+  <div style="position: absolute; top: 34px; right: 40px; font-size: 10px; letter-spacing: .22em; font-weight: 300; color: rgba(160,224,255,.72); text-align: right;">ADAPTIVE&nbsp;·&nbsp;RESPONSIVE&nbsp;·&nbsp;INTELLIGENT&nbsp;ASSISTANT</div>
+
+  <!-- Corner viewfinder brackets -->
+  <sc-if value="{{ showBrackets }}" hint-placeholder-val="{{ true }}">
+    <div style="position: absolute; top: 26px; left: 26px; width: 46px; height: 46px; border-top: 1px solid rgba(47,184,255,.4); border-left: 1px solid rgba(47,184,255,.4);"></div>
+    <div style="position: absolute; top: 26px; right: 26px; width: 46px; height: 46px; border-top: 1px solid rgba(47,184,255,.4); border-right: 1px solid rgba(47,184,255,.4);"></div>
+    <div style="position: absolute; bottom: 26px; left: 26px; width: 46px; height: 46px; border-bottom: 1px solid rgba(47,184,255,.4); border-left: 1px solid rgba(47,184,255,.4);"></div>
+    <div style="position: absolute; bottom: 26px; right: 26px; width: 46px; height: 46px; border-bottom: 1px solid rgba(47,184,255,.4); border-right: 1px solid rgba(47,184,255,.4);"></div>
+  </sc-if>
+
+  <!-- HUD stage -->
+  <div style="position: relative; width: 560px; height: 560px; display: flex; align-items: center; justify-content: center; flex: none; transform: translate({{ px }}px, {{ py }}px); transition: transform .35s ease-out;">
+
+    <!-- Tick ring -->
+    <div style="position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;">
+      <sc-for list="{{ ticks }}" as="tick" hint-placeholder-count="60">
+        <div style="position: absolute; left: 50%; top: 50%; width: {{ tick.w }}px; height: {{ tick.h }}px; margin-left: -1px; background: var(--accent, #2fb8ff); opacity: {{ tick.op }}; transform-origin: 50% 0; transform: {{ tick.transform }};"></div>
+      </sc-for>
+    </div>
+
+    <!-- Outer dashed ring (with orbiting nodes) -->
+    <div style="position: absolute; width: 452px; height: 452px; border-radius: 50%; border: 1px dashed rgba(47,184,255,.32); animation: aria-spin 60s linear infinite; animation-duration: {{ outerDur }};">
+      <sc-for list="{{ nodes }}" as="node" hint-placeholder-count="4">
+        <div style="position: absolute; left: 50%; top: 50%; width: 7px; height: 7px; margin: -3.5px 0 0 -3.5px; border-radius: 50%; background: var(--accent, #2fb8ff); box-shadow: 0 0 10px 2px var(--accent, #2fb8ff); transform-origin: 50% 50%; transform: {{ node.transform }}; animation: aria-node-breathe 3.4s ease-in-out infinite;"></div>
+      </sc-for>
+    </div>
+
+    <!-- Inner dashed ring (counter-rotating) -->
+    <div style="position: absolute; width: 344px; height: 344px; border-radius: 50%; border: 1px dashed rgba(127,223,255,.22); animation: aria-spin-rev 45s linear infinite; animation-duration: {{ innerDur }};"></div>
+
+    <!-- Thin solid ring for depth -->
+    <div style="position: absolute; width: 258px; height: 258px; border-radius: 50%; border: 1px solid rgba(47,184,255,.14);"></div>
+
+    <!-- Particle swarm core (click to cycle states) -->
+    <div onClick="{{ cycle }}" style="position: relative; width: 300px; height: 300px; display: flex; align-items: center; justify-content: center; cursor: pointer; transition: transform .3s cubic-bezier(.2,.8,.3,1);" style-hover="transform: scale(1.05);">
+      <canvas ref="{{ canvasRef }}" width="600" height="600" style="width: 300px; height: 300px; display: block;"></canvas>
+    </div>
+  </div>
+
+  <!-- Status + transcript -->
+  <div style="position: relative; width: 560px; max-width: 90vw; margin-top: 6px; text-align: center; z-index: 2;">
+    <div style="font-size: 11px; letter-spacing: .42em; font-weight: 500; color: var(--accent, #2fb8ff); text-transform: uppercase; text-shadow: 0 0 12px rgba(47,184,255,.5);">{{ statusLabel }}</div>
+    <div style="margin-top: 22px; display: flex; flex-direction: column; gap: 9px; align-items: center;">
+      <div style="font-size: 12.5px; font-weight: 300; letter-spacing: .04em; color: rgba(127,223,255,.5);"><span style="color: rgba(127,223,255,.32);">&gt;&nbsp;</span>{{ command }}</div>
+      <div style="font-size: 13px; font-weight: 400; letter-spacing: .02em; color: rgba(180,236,255,.9); max-width: 460px; line-height: 1.5; text-wrap: pretty;">{{ response }}</div>
+    </div>
+  </div>
+
+  <!-- Prototype state switcher -->
+  <div style="position: absolute; bottom: 30px; left: 50%; transform: translateX(-50%); display: flex; gap: 2px; padding: 4px; border: 1px solid rgba(47,184,255,.16); border-radius: 2px; background: rgba(10,18,34,.5); backdrop-filter: blur(6px); z-index: 3;">
+    <sc-for list="{{ modes }}" as="m" hint-placeholder-count="4">
+      <button onClick="{{ m.on }}" style="border: none; background: {{ m.bg }}; color: {{ m.fg }}; font-family: inherit; font-size: 10px; letter-spacing: .22em; text-transform: uppercase; font-weight: 400; padding: 8px 16px; cursor: pointer; border-radius: 1px; transition: color .2s, background .2s;" style-hover="color: #cdefff;">{{ m.label }}</button>
+    </sc-for>
+  </div>
+
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;$preview&quot;:{&quot;width&quot;:&quot;100%&quot;,&quot;height&quot;:720},&quot;accentColor&quot;:{&quot;editor&quot;:&quot;color&quot;,&quot;default&quot;:&quot;#2fb8ff&quot;,&quot;tsType&quot;:&quot;string&quot;,&quot;section&quot;:&quot;Appearance&quot;},&quot;defaultState&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;options&quot;:[&quot;idle&quot;,&quot;listening&quot;,&quot;thinking&quot;,&quot;speaking&quot;],&quot;default&quot;:&quot;idle&quot;,&quot;tsType&quot;:&quot;string&quot;,&quot;section&quot;:&quot;Behavior&quot;},&quot;showCornerBrackets&quot;:{&quot;editor&quot;:&quot;boolean&quot;,&quot;default&quot;:true,&quot;tsType&quot;:&quot;boolean&quot;,&quot;section&quot;:&quot;Appearance&quot;},&quot;coreSize&quot;:{&quot;editor&quot;:&quot;range&quot;,&quot;default&quot;:78,&quot;min&quot;:60,&quot;max&quot;:110,&quot;step&quot;:2,&quot;unit&quot;:&quot;px&quot;,&quot;tsType&quot;:&quot;number&quot;,&quot;section&quot;:&quot;Appearance&quot;}}">
+class Component extends DCLogic {
+  state = { mode: this.props.defaultState || 'idle', px: 0, py: 0 };
+  canvasRef = React.createRef();
+
+  // Target motion parameters per state (smoothly interpolated at runtime)
+  static PARAMS = {
+    idle:      { rot: 0.13, R: 100, breathe: 0.05, freq: 0.75, jitter: 0.4, dot: 0.95, alpha: 1.00, bloom: 0.28 },
+    listening: { rot: 0.30, R: 86,  breathe: 0.07, freq: 2.20, jitter: 0.7, dot: 1.00, alpha: 1.15, bloom: 0.38 },
+    thinking:  { rot: 0.95, R: 104, breathe: 0.02, freq: 1.00, jitter: 0.5, dot: 0.92, alpha: 1.08, bloom: 0.3 },
+    speaking:  { rot: 0.42, R: 98,  breathe: 0.13, freq: 5.00, jitter: 1.6, dot: 1.05, alpha: 1.20, bloom: 0.44 },
+  };
+
+  componentDidMount() {
+    // Global bridge: lets Python (pywebview .evaluate_js) drive the HUD state.
+    // Contract: window.setState("idle" | "listening" | "thinking" | "speaking")
+    window.setState = (m) => {
+      if (['idle', 'listening', 'thinking', 'speaking'].includes(m)) {
+        this.setState({ mode: m });
+      }
+    };
+    this._onMove = (e) => {
+      const nx = (e.clientX / window.innerWidth - 0.5) * 2;
+      const ny = (e.clientY / window.innerHeight - 0.5) * 2;
+      this.setState({ px: nx * 10, py: ny * 10 });
+    };
+    window.addEventListener('mousemove', this._onMove);
+    this._initSwarm();
+  }
+  componentWillUnmount() {
+    window.removeEventListener('mousemove', this._onMove);
+    if (this._raf) cancelAnimationFrame(this._raf);
+  }
+
+  _hexToRgb(hex) {
+    const h = (hex || '#2fb8ff').replace('#', '');
+    const n = h.length === 3 ? h.split('').map(c => c + c).join('') : h;
+    return [parseInt(n.slice(0, 2), 16), parseInt(n.slice(2, 4), 16), parseInt(n.slice(4, 6), 16)];
+  }
+
+  _buildSprite(accent) {
+    const [r, g, b] = this._hexToRgb(accent);
+    const s = document.createElement('canvas');
+    s.width = s.height = 64;
+    const c = s.getContext('2d');
+    const grd = c.createRadialGradient(32, 32, 0, 32, 32, 32);
+    grd.addColorStop(0.0, 'rgba(255,255,255,1)');
+    grd.addColorStop(0.30, 'rgba(240,252,255,1)');
+    grd.addColorStop(0.5, `rgba(${Math.min(r + 110, 255)},${Math.min(g + 70, 255)},255,1)`);
+    grd.addColorStop(0.72, `rgba(${r},${g},${b},0.85)`);
+    grd.addColorStop(1.0, `rgba(${r},${g},${b},0)`);
+    c.fillStyle = grd;
+    c.fillRect(0, 0, 64, 64);
+    this._sprite = s;
+    this._spriteAccent = accent;
+    this._rgb = [r, g, b];
+  }
+
+  _initSwarm() {
+    const canvas = this.canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    const W = canvas.width, H = canvas.height, cx = W / 2, cy = H / 2;
+
+    // Fibonacci-sphere distribution of ~220 particles
+    const N = 300;
+    const golden = Math.PI * (3 - Math.sqrt(5));
+    const pts = [];
+    for (let i = 0; i < N; i++) {
+      const y = 1 - (i / (N - 1)) * 2;
+      const rad = Math.sqrt(Math.max(0, 1 - y * y));
+      const th = i * golden;
+      pts.push({
+        x: Math.cos(th) * rad,
+        y: y,
+        z: Math.sin(th) * rad,
+        ph: Math.random() * Math.PI * 2,
+        sp: 0.6 + Math.random() * 0.9,
+        sz: 0.55 + Math.random() * 0.7,
+      });
+    }
+    this._pts = pts;
+    this._buildSprite(this.props.accentColor || '#2fb8ff');
+
+    // Current (interpolated) params — start at idle
+    const P = Component.PARAMS.idle;
+    this._cur = { rot: P.rot, R: P.R, breathe: P.breathe, freq: P.freq, jitter: P.jitter, dot: P.dot, alpha: P.alpha, bloom: P.bloom };
+    this._angle = 0;
+    this._tilt = 0.42;
+    this._last = performance.now();
+
+    const loop = (now) => {
+      const dt = Math.min(0.05, (now - this._last) / 1000);
+      this._last = now;
+      const t = now / 1000;
+
+      // Ease current params toward the active state's targets
+      const tgt = Component.PARAMS[this.state.mode] || Component.PARAMS.idle;
+      const k = 1 - Math.pow(0.0025, dt); // smooth ~critically damped feel
+      for (const key in this._cur) this._cur[key] += (tgt[key] - this._cur[key]) * k;
+      const cu = this._cur;
+
+      // Global rotation + gentle tilt wobble
+      this._angle += cu.rot * dt;
+      const tilt = this._tilt + Math.sin(t * 0.18) * 0.12;
+      const cosA = Math.cos(this._angle), sinA = Math.sin(this._angle);
+      const cosT = Math.cos(tilt), sinT = Math.sin(tilt);
+
+      // Breathing scale (irregular waveform in speaking)
+      let breath;
+      if (this.state.mode === 'speaking') {
+        breath = 1 + cu.breathe * (0.6 * Math.sin(t * 9) + 0.4 * Math.sin(t * 15.3 + 1.1));
+      } else {
+        breath = 1 + cu.breathe * Math.sin(t * cu.freq);
+      }
+      const R = cu.R * breath;
+
+      // Rebuild sprite if accent changed via tweak
+      const accent = this.props.accentColor || '#2fb8ff';
+      if (accent !== this._spriteAccent) this._buildSprite(accent);
+
+      ctx.clearRect(0, 0, W, H);
+      ctx.globalCompositeOperation = 'lighter';
+
+      // Central bloom — makes the core read as a powerful light source
+      const rgb = this._rgb || [47, 184, 255];
+      const bAmp = cu.bloom * (0.9 + (breath - 1) * 3);
+      const bl = ctx.createRadialGradient(cx, cy, 0, cx, cy, R * 2.5);
+      bl.addColorStop(0.0, `rgba(255,255,255,${Math.min(0.5, 0.42 * bAmp)})`);
+      bl.addColorStop(0.22, `rgba(${rgb[0]},${rgb[1]},${rgb[2]},${0.32 * bAmp})`);
+      bl.addColorStop(0.55, `rgba(${rgb[0]},${rgb[1]},${rgb[2]},${0.1 * bAmp})`);
+      bl.addColorStop(1.0, 'rgba(0,0,0,0)');
+      ctx.fillStyle = bl;
+      ctx.fillRect(0, 0, W, H);
+
+      const fov = 340;
+
+      for (let i = 0; i < this._pts.length; i++) {
+        const p = this._pts[i];
+        // per-particle jitter
+        const jx = Math.sin(t * p.sp + p.ph) * cu.jitter;
+        const jy = Math.cos(t * p.sp * 1.3 + p.ph) * cu.jitter;
+        // rotate around Y
+        let x = p.x * cosA + p.z * sinA;
+        let z = -p.x * sinA + p.z * cosA;
+        let y = p.y;
+        // tilt around X
+        const y2 = y * cosT - z * sinT;
+        const z2 = y * sinT + z * cosT;
+        const wx = x * R + jx;
+        const wy = y2 * R + jy;
+        const wz = z2 * R;
+
+        const persp = fov / (fov + wz);
+        const sx = cx + wx * persp;
+        const sy = cy + wy * persp;
+        const depth = (wz + R) / (2 * R); // 0 back .. 1 front
+        // Uniform size & brightness for every dot — front and back look identical
+        const size = 6 * p.sz * cu.dot;
+        ctx.globalAlpha = Math.max(0, Math.min(1, cu.alpha));
+        ctx.drawImage(this._sprite, sx - size, sy - size, size * 2, size * 2);
+      }
+      ctx.globalAlpha = 1;
+      ctx.globalCompositeOperation = 'source-over';
+
+      this._raf = requestAnimationFrame(loop);
+    };
+    this._raf = requestAnimationFrame(loop);
+  }
+
+  renderVals() {
+    const accent = this.props.accentColor || '#2fb8ff';
+    const size = this.props.coreSize;
+    const showBrackets = this.props.showCornerBrackets !== false;
+
+    const glowTight = 'drop-shadow(0 0 14px rgba(47,184,255,.9)) drop-shadow(0 0 34px rgba(47,184,255,.45))';
+    const glowSoft  = 'drop-shadow(0 0 18px rgba(47,184,255,.7)) drop-shadow(0 0 48px rgba(47,184,255,.32))';
+    const glowSteady= 'drop-shadow(0 0 22px rgba(80,185,242,.85)) drop-shadow(0 0 60px rgba(47,184,255,.4))';
+
+    const STATES = {
+      idle: {
+        outerDur: '68s', innerDur: '54s', frameDur: '38s',
+        coreAnim: 'aria-pulse-slow 5.2s ease-in-out infinite',
+        coreGlow: glowSoft,
+        statusLabel: 'Idle · Standing by',
+        command: 'awaiting input',
+        response: 'All systems nominal. I\u2019m here when you need me.',
+      },
+      listening: {
+        outerDur: '40s', innerDur: '32s', frameDur: '22s',
+        coreAnim: 'aria-pulse-fast 1.7s ease-in-out infinite',
+        coreGlow: glowTight,
+        statusLabel: 'Listening',
+        command: 'receiving audio\u2026',
+        response: 'Go ahead \u2014 I\u2019m listening.',
+      },
+      thinking: {
+        outerDur: '9s', innerDur: '6.5s', frameDur: '5s',
+        coreAnim: 'none',
+        coreGlow: glowSteady,
+        statusLabel: 'Thinking',
+        command: 'set a reminder for the design review tomorrow at 9',
+        response: 'Cross-referencing your calendar and preferences\u2026',
+      },
+      speaking: {
+        outerDur: '24s', innerDur: '19s', frameDur: '14s',
+        coreAnim: 'aria-wave 0.62s ease-in-out infinite',
+        coreGlow: glowTight,
+        statusLabel: 'Speaking',
+        command: 'set a reminder for the design review tomorrow at 9',
+        response: 'Done. I\u2019ve set a reminder for the design review tomorrow at 9:00 AM.',
+      },
+    };
+
+    const mode = this.state.mode;
+    const cfg = STATES[mode];
+    const order = ['idle', 'listening', 'thinking', 'speaking'];
+    const cycle = () => this.setState(s => ({ mode: order[(order.indexOf(s.mode) + 1) % order.length] }));
+
+    // Tick ring
+    const N = 60;
+    const radius = size ? -(size + 172) : -250;
+    const ticks = [];
+    for (let i = 0; i < N; i++) {
+      const major = i % 5 === 0;
+      const angle = i * (360 / N);
+      ticks.push({
+        transform: `rotate(${angle}deg) translateY(${radius}px)`,
+        h: major ? 15 : 7,
+        w: major ? 2 : 1,
+        op: major ? 0.85 : 0.32,
+      });
+    }
+
+    // Orbiting nodes on outer ring
+    const nodeR = -226;
+    const nodes = [42, 128, 205, 312].map(a => ({
+      transform: `rotate(${a}deg) translateY(${nodeR}px)`,
+    }));
+
+    // Prototype switcher
+    const labels = { idle: 'Idle', listening: 'Listen', thinking: 'Think', speaking: 'Speak' };
+    const modes = ['idle', 'listening', 'thinking', 'speaking'].map(m => {
+      const active = m === mode;
+      return {
+        label: labels[m],
+        on: () => this.setState({ mode: m }),
+        bg: active ? 'rgba(47,184,255,.14)' : 'transparent',
+        fg: active ? '#9fe6ff' : 'rgba(127,223,255,.42)',
+      };
+    });
+
+    return {
+      accent, showBrackets, ticks, nodes, modes, cycle,
+      canvasRef: this.canvasRef,
+      px: this.state.px, py: this.state.py,
+      outerDur: cfg.outerDur,
+      innerDur: cfg.innerDur,
+      frameDur: cfg.frameDur,
+      coreAnim: cfg.coreAnim,
+      coreGlow: cfg.coreGlow,
+      statusLabel: cfg.statusLabel,
+      command: cfg.command,
+      response: cfg.response,
+    };
+  }
+}
+</script>
+</body>
+</html>
