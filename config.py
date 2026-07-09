@@ -35,6 +35,14 @@ def _get_float(name, default):
         return default
 
 
+def _get_set(name, default):
+    """Parse a comma-separated environment variable into a set of strings."""
+    raw = os.environ.get(name)
+    if raw is None:
+        return set(default)
+    return {item.strip() for item in raw.split(",") if item.strip()}
+
+
 # --- Secrets (loaded from environment) --------------------------------------
 SLACK_BOT_TOKEN = os.environ.get("SLACK_BOT_TOKEN", "")
 SLACK_APP_TOKEN = os.environ.get("SLACK_APP_TOKEN", "")  # Socket Mode (used later)
@@ -90,7 +98,8 @@ DEFAULT_MODEL = "hermes3"
 AGENT_MODELS = {
     "Sarah": "deepseek-r1:14b",
     "Tom": DEFAULT_MODEL,
-    "Ava": DEFAULT_MODEL,
+    # Ava writes hooks and captions — creative-reasoning work, so the better model.
+    "Ava": "deepseek-r1:14b",
     # Bobby is numbers-and-reasoning (CPA/ROAS deltas, scale/cut calls) — the
     # workload where the reasoning model earns its slot, same as Sarah.
     "Bobby": "deepseek-r1:14b",
@@ -102,3 +111,13 @@ AGENT_MODELS = {
 # prompt. The model never gets a path to spend that bypasses these.
 MAX_DAILY_BUDGET_DELTA = _get_float("MAX_DAILY_BUDGET_DELTA", 15)   # per action
 MAX_TOTAL_DAILY_SPEND = _get_float("MAX_TOTAL_DAILY_SPEND", 200)    # across all
+
+# --- Content / publishing (Ava) ---------------------------------------------
+# Real Remotion render is gated behind this; default stub just writes a fake MP4.
+USE_REAL_REMOTION = _get_bool("USE_REAL_REMOTION", False)
+# Where rendered clips (stub or real) are written.
+RENDER_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "renders")
+# Platforms Ava is allowed to schedule to — enforced in code (metricool.py).
+METRICOOL_PLATFORM_ALLOWLIST = _get_set(
+    "METRICOOL_PLATFORM_ALLOWLIST", {"instagram", "tiktok", "youtube_shorts"}
+)

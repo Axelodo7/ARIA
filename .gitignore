@@ -6,6 +6,9 @@
 memory/aria_memory.db
 memory/*.jsonl
 
+# --- Rendered content (stub or real MP4s) -----------------------------------
+renders/
+
 # --- Python -----------------------------------------------------------------
 __pycache__/
 *.py[cod]
