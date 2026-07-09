@@ -42,6 +42,27 @@ def read_channel(channel_id, limit=50):
     return [m.get("text", "") for m in resp["messages"]]
 
 
+def history(channel_id, limit=50):
+    """Return raw message dicts (newest first) — includes ts, bot_id, etc.
+
+    Useful when you need more than the text (e.g. deleting messages by ts).
+    """
+    resp = client.conversations_history(channel=channel_id, limit=limit)
+    return resp["messages"]
+
+
+def delete_message(channel_id, ts):
+    """Delete a single message by timestamp. Respects DRY_RUN.
+
+    The bot can only delete messages it authored (which is every persona post,
+    since they all go out under the one bot token).
+    """
+    if config.DRY_RUN:
+        print(f"[DRY_RUN] delete_message {channel_id} ts={ts}")
+        return
+    client.chat_delete(channel=channel_id, ts=ts)
+
+
 def request_approval(agent_name, description, payload_id):
     """Post an action to #approvals for human sign-off.
 

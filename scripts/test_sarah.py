@@ -75,6 +75,24 @@ def preflight_ollama():
     return True
 
 
+def cleanup(channel_key):
+    """Delete bot-authored (test) messages from a channel for a clean slate.
+
+    Only touches messages the bot posted (bot_id / bot_message subtype), so
+    genuine user feedback from real Slack accounts is never removed.
+    """
+    cid = config.CHANNEL_IDS.get(channel_key)
+    if not cid:
+        print(f"  (no channel id for {channel_key}; skipping cleanup)")
+        return
+    deleted = 0
+    for m in slack_bus.history(cid, limit=100):
+        if m.get("bot_id") or m.get("subtype") == "bot_message":
+            slack_bus.delete_message(cid, m["ts"])
+            deleted += 1
+    print(f"  cleaned #{channel_key}: deleted {deleted} bot message(s)")
+
+
 def main():
     print("=" * 64)
     print("Sarah — Step 2 smoke test")
@@ -93,6 +111,11 @@ def main():
     print("\n--- Checking Ollama ---------------------------------------------")
     if not preflight_ollama():
         return
+
+    # --- Step 0: clean up prior test messages -------------------------------
+    print("\n--- Cleaning up prior test messages -----------------------------")
+    cleanup("feedback")
+    cleanup("support_intel")
 
     # --- Step A: post fake feedback as fake users ---------------------------
     print("\n--- Posting fake feedback to #feedback --------------------------")
