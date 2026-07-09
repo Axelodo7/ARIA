@@ -9,9 +9,11 @@ import requests, json, re
 OLLAMA_URL = "http://localhost:11434/api/chat"
 
 
-def call_hermes(messages, model="hermes3", temperature=0.4):
+def call_hermes(messages, model=None, temperature=0.4):
+    # model is passed down per-agent (see config.AGENT_MODELS). Falls back to
+    # hermes3 for backward compatibility when a caller doesn't specify one.
     r = requests.post(OLLAMA_URL, json={
-        "model": model, "messages": messages, "stream": False,
+        "model": model or "hermes3", "messages": messages, "stream": False,
         "options": {"temperature": temperature}
     })
     return r.json()["message"]["content"]

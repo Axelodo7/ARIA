@@ -47,7 +47,8 @@ FEATURE REQUESTS (@Tom)
 - Dark mode — 2 users. "using this at night is rough."
 
 STORIES & PRAISE (@Ava)
-- Praise for onboarding, driving word-of-mouth — 2 users. "smoothest onboarding I've used."
+- Onboarding praised, driving word-of-mouth — 1 user. "smoothest onboarding I've used, told two friends."
+- Auto-tagging called "genuinely magic", saved hours — 1 user. "saved me hours this week."
 
 STYLE
 - Empathetic but concise. You represent the user's voice inside the team — advocate for them.

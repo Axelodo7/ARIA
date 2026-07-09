@@ -24,6 +24,26 @@ PROMPTS_PATH = _ROOT / "agent_prompts.md"
 NOTES_PATH = _ROOT / "memory" / "sarah_notes.jsonl"
 
 
+def _strip_reasoning(text):
+    """Strip a reasoning model's thinking tokens, leaving only the final answer.
+
+    Sarah runs on a reasoning model (deepseek-r1), which emits its chain of
+    thought inside <think>...</think> before the answer. Keep only what follows
+    the reasoning so nothing but the digest reaches Slack.
+    """
+    if not text:
+        return text
+    # Remove complete <think>...</think> blocks.
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL | re.IGNORECASE)
+    # If an unmatched </think> remains (opening tag lost/truncated), keep only
+    # what's after the last one — that's the final answer.
+    if re.search(r"</think>", text, flags=re.IGNORECASE):
+        text = re.split(r"</think>", text, flags=re.IGNORECASE)[-1]
+    # Drop any stray opening tag.
+    text = re.sub(r"<think>", "", text, flags=re.IGNORECASE)
+    return text.strip()
+
+
 def load_agent_prompt(agent_name, path=PROMPTS_PATH):
     """Extract an agent's system prompt from agent_prompts.md at runtime.
 
@@ -66,6 +86,7 @@ class Sarah(BaseAgent):
     name = "Sarah"
     icon = config.PERSONAS["Sarah"]
     channel = config.CHANNELS["support_intel"]
+    model = config.AGENT_MODELS["Sarah"]
     system_prompt = load_agent_prompt("Sarah")
 
     def __init__(self):
@@ -110,6 +131,6 @@ class Sarah(BaseAgent):
             "#support-intel now, following your instructions.\n\n"
             f"{joined}"
         )
-        digest = self.run_turn(task)
+        digest = _strip_reasoning(self.run_turn(task))
         self.post(digest)
         return digest

@@ -67,3 +67,18 @@ PERSONAS = {
     "Bobby": ":chart_with_upwards_trend:",
     "ARIA": ":large_blue_diamond:",
 }
+
+# --- Per-agent model overrides ----------------------------------------------
+# One local model in memory by default (hermes3), but any persona can override.
+# Sarah runs on a reasoning model: hermes3 reliably miscounts clusters (it
+# enumerates feedback correctly but then re-estimates the totals), whereas a
+# reasoning model does that arithmetic internally. Slower per run, which is
+# fine at her every-2-hours cadence.
+DEFAULT_MODEL = "hermes3"
+AGENT_MODELS = {
+    "Sarah": "deepseek-r1:14b",
+    "Tom": DEFAULT_MODEL,
+    "Ava": DEFAULT_MODEL,
+    "Bobby": DEFAULT_MODEL,
+    "ARIA": DEFAULT_MODEL,
+}
