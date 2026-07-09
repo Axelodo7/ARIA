@@ -1,3 +1,6 @@
-# Step 1 — Slack bus only. We add to this as later build steps land.
+# Step 1 — Slack bus. We add to this as later build steps land.
 slack-sdk
 python-dotenv
+
+# Step 2 — Sarah / Hermes via Ollama.
+requests
