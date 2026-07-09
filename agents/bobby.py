@@ -68,12 +68,21 @@ def _build_report_task(analyses, total_recent_spend):
     """Build the model prompt: hand it the finished numbers, ask for the narrative."""
     rows = []
     for a in analyses:
+        if a["action"] == "scale":
+            new_spend = a["recent_spend"] + a["delta"]
+            rec = (f"PROPOSED ACTION: scale by exactly +${a['delta']:.0f}/day "
+                   f"(from ${a['recent_spend']:.0f}/day to ${new_spend:.0f}/day)")
+        elif a["action"] == "pause":
+            rec = "PROPOSED ACTION: pause"
+        else:
+            rec = "PROPOSED ACTION: hold (no change)"
         rows.append(
             f"- {a['name']} [{a['creative_id']}]: "
             f"CPA ${a['cpa_base']:.2f}->${a['cpa_recent']:.2f} ({a['cpa_pct']:+.0f}%), "
             f"CTR {a['ctr_base']:.2f}%->{a['ctr_recent']:.2f}% ({a['ctr_pct']:+.0f}%), "
             f"ROAS {a['roas_base']:.2f}->{a['roas_recent']:.2f} ({a['roas_pct']:+.0f}%), "
-            f"recent spend ${a['recent_spend']:.0f}/day. Signal: {a['classification']}."
+            f"recent spend ${a['recent_spend']:.0f}/day. Signal: {a['classification']}. "
+            f"{rec}."
         )
     table = "\n".join(rows)
     return (
@@ -86,11 +95,14 @@ def _build_report_task(analyses, total_recent_spend):
         f"change ${config.MAX_DAILY_BUDGET_DELTA:.0f}).\n\n"
         "Write your #ads report now: lead with a one-line TL;DR, then per "
         "creative give the numbers first and the WHY second (frequency fatigue? "
-        "creative decay? audience overlap?), and your recommended action. Flag "
-        "small samples honestly. The formal scale/pause proposals are filed "
-        "separately to #approvals — in the report just state the recommendation "
-        "and its evidence. Output ONLY the report: no drafted messages, no code, "
-        "no extra sections."
+        "creative decay? audience overlap?), and your recommended action. When "
+        "you state a scale recommendation you MUST quote the exact dollar amount "
+        "from that creative's PROPOSED ACTION above — never a percentage and "
+        "never a figure you make up; those exact amounts are what get filed to "
+        "#approvals and the two must match. Flag small samples honestly. The "
+        "formal scale/pause proposals are filed separately to #approvals — in "
+        "the report just state the recommendation and its evidence. Output ONLY "
+        "the report: no drafted messages, no code, no extra sections."
     )
 
 
