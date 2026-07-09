@@ -23,6 +23,18 @@ def _get_bool(name, default):
     return raw.strip().lower() in ("1", "true", "yes", "on")
 
 
+def _get_float(name, default):
+    """Parse a numeric environment variable, falling back to default if unset
+    or unparseable."""
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
 # --- Secrets (loaded from environment) --------------------------------------
 SLACK_BOT_TOKEN = os.environ.get("SLACK_BOT_TOKEN", "")
 SLACK_APP_TOKEN = os.environ.get("SLACK_APP_TOKEN", "")  # Socket Mode (used later)
@@ -79,6 +91,14 @@ AGENT_MODELS = {
     "Sarah": "deepseek-r1:14b",
     "Tom": DEFAULT_MODEL,
     "Ava": DEFAULT_MODEL,
-    "Bobby": DEFAULT_MODEL,
+    # Bobby is numbers-and-reasoning (CPA/ROAS deltas, scale/cut calls) — the
+    # workload where the reasoning model earns its slot, same as Sarah.
+    "Bobby": "deepseek-r1:14b",
     "ARIA": DEFAULT_MODEL,
 }
+
+# --- Budget guardrails ------------------------------------------------------
+# Hard caps enforced in CODE (integrations/ads_platform.py), not just in the
+# prompt. The model never gets a path to spend that bypasses these.
+MAX_DAILY_BUDGET_DELTA = _get_float("MAX_DAILY_BUDGET_DELTA", 15)   # per action
+MAX_TOTAL_DAILY_SPEND = _get_float("MAX_TOTAL_DAILY_SPEND", 200)    # across all

@@ -10,58 +10,16 @@ tool. Hermes is hit once per run; the tool loop only engages if she chooses to
 call save_note.
 """
 import json
-import re
 from datetime import datetime, timezone
 from pathlib import Path
 
 import config
-from agents.base_agent import BaseAgent
+from agents.base_agent import BaseAgent, load_agent_prompt, strip_reasoning
 from integrations.slack_bus import read_channel
 
 # --- Paths ------------------------------------------------------------------
 _ROOT = Path(__file__).resolve().parent.parent
-PROMPTS_PATH = _ROOT / "agent_prompts.md"
 NOTES_PATH = _ROOT / "memory" / "sarah_notes.jsonl"
-
-
-def _strip_reasoning(text):
-    """Strip a reasoning model's thinking tokens, leaving only the final answer.
-
-    Sarah runs on a reasoning model (deepseek-r1), which emits its chain of
-    thought inside <think>...</think> before the answer. Keep only what follows
-    the reasoning so nothing but the digest reaches Slack.
-    """
-    if not text:
-        return text
-    # Remove complete <think>...</think> blocks.
-    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL | re.IGNORECASE)
-    # If an unmatched </think> remains (opening tag lost/truncated), keep only
-    # what's after the last one — that's the final answer.
-    if re.search(r"</think>", text, flags=re.IGNORECASE):
-        text = re.split(r"</think>", text, flags=re.IGNORECASE)[-1]
-    # Drop any stray opening tag.
-    text = re.sub(r"<think>", "", text, flags=re.IGNORECASE)
-    return text.strip()
-
-
-def load_agent_prompt(agent_name, path=PROMPTS_PATH):
-    """Extract an agent's system prompt from agent_prompts.md at runtime.
-
-    Prompts are the single source of truth in that file: each lives in the first
-    fenced code block after its "## <Name> — ..." heading. Never inline them
-    into Python.
-    """
-    text = Path(path).read_text(encoding="utf-8")
-    pattern = re.compile(
-        r"^##\s+" + re.escape(agent_name) + r"\b[^\n]*\n+```[^\n]*\n(.*?)^```",
-        re.DOTALL | re.MULTILINE,
-    )
-    m = pattern.search(text)
-    if not m:
-        raise ValueError(
-            f"Could not find a prompt block for '{agent_name}' in {path}"
-        )
-    return m.group(1).strip()
 
 
 # --- Tool spec (format injected separately by tools_block) -------------------
@@ -131,6 +89,6 @@ class Sarah(BaseAgent):
             "#support-intel now, following your instructions.\n\n"
             f"{joined}"
         )
-        digest = _strip_reasoning(self.run_turn(task))
+        digest = strip_reasoning(self.run_turn(task))
         self.post(digest)
         return digest
