@@ -63,6 +63,7 @@ CHANNELS = {
     "content": "#content",
     "ads": "#ads",
     "approvals": "#approvals",
+    "ops": "#ops",          # daemon health/error channel
 }
 
 # Channel IDs (e.g. "C0123ABCD") are required by conversations_history and

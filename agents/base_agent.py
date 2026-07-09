@@ -9,7 +9,9 @@ strip_reasoning (drop a reasoning model's <think> tokens before posting).
 import json, re, threading
 from pathlib import Path
 
+import config
 from brain.hermes_common import call_hermes, parse_tool_call, tools_block
+from integrations import slack_bus
 from integrations.slack_bus import post_as
 
 # agent_prompts.md sits at the project root (one level up from agents/).
@@ -88,3 +90,26 @@ class BaseAgent:
 
     def post(self, text):
         post_as(self.name, self.icon, self.channel, text)
+
+    def process_pending_approvals(self):
+        """Read this agent's own #approvals messages and report their status.
+
+        For now this only READS and reports (approved / rejected / pending) — it
+        never executes the approved action. Every real action path
+        (apply_budget_change, schedule_post, git_push_to_main) stays
+        dry-run/gate-locked, so the daemon polling this is safe by construction.
+        Returns a list of {payload_id, ts, status}.
+        """
+        approvals_id = config.CHANNEL_IDS.get("approvals")
+        if not approvals_id:
+            return []
+        results = []
+        for m in slack_bus.history(approvals_id, limit=50):
+            if m.get("username") != self.name:
+                continue  # only this agent's own proposals
+            ts = m.get("ts")
+            status = slack_bus.check_approval(approvals_id, ts)
+            match = re.search(r"\[`?([^\]`]+)`?\]", m.get("text", ""))
+            results.append({"payload_id": match.group(1) if match else None,
+                            "ts": ts, "status": status})
+        return results
