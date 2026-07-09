@@ -97,7 +97,9 @@ PERSONAS = {
 DEFAULT_MODEL = "hermes3"
 AGENT_MODELS = {
     "Sarah": "deepseek-r1:14b",
-    "Tom": DEFAULT_MODEL,
+    # Tom fixes code — reasoning work, so the better model (the weakest link, so
+    # give it every advantage).
+    "Tom": "deepseek-r1:14b",
     # Ava writes hooks and captions — creative-reasoning work, so the better model.
     "Ava": "deepseek-r1:14b",
     # Bobby is numbers-and-reasoning (CPA/ROAS deltas, scale/cut calls) — the
@@ -111,6 +113,17 @@ AGENT_MODELS = {
 # prompt. The model never gets a path to spend that bypasses these.
 MAX_DAILY_BUDGET_DELTA = _get_float("MAX_DAILY_BUDGET_DELTA", 15)   # per action
 MAX_TOTAL_DAILY_SPEND = _get_float("MAX_TOTAL_DAILY_SPEND", 200)    # across all
+
+# --- Developer / repo (Tom) -------------------------------------------------
+# Tom works on a THROWAWAY practice repo, never his own codebase. Absolute path
+# so subprocess git calls have an unambiguous working directory.
+TOM_REPO_PATH = os.path.abspath(
+    os.environ.get("TOM_REPO_PATH")
+    or os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "tom_workspace")
+)
+# Scope caps — Tom refuses any plan/diff exceeding these. No unlimited changes.
+MAX_FILES_TOUCHED_PER_CYCLE = int(_get_float("MAX_FILES_TOUCHED_PER_CYCLE", 2))
+MAX_DIFF_LINES = int(_get_float("MAX_DIFF_LINES", 40))
 
 # --- Content / publishing (Ava) ---------------------------------------------
 # Real Remotion render is gated behind this; default stub just writes a fake MP4.
