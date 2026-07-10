@@ -20,3 +20,8 @@ numpy
 # prebuilt-wheel build of `webrtcvad` (imports as `webrtcvad`) so no C compiler
 # is needed on Windows.
 webrtcvad-wheels
+
+# Step 6 — HUD window (pywebview). On Windows the EdgeChromium backend needs
+# pythonnet and the Edge WebView2 runtime (preinstalled on most machines).
+pywebview
+pythonnet
