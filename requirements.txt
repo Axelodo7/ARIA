@@ -11,3 +11,7 @@ apscheduler
 # Step 6 — ElevenLabs TTS (ARIA voice) + audio playback.
 elevenlabs
 sounddevice
+
+# Step 6 — faster-whisper STT.
+faster-whisper
+numpy
