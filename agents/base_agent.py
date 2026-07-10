@@ -10,7 +10,8 @@ import json, re, threading
 from pathlib import Path
 
 import config
-from brain.hermes_common import call_hermes, parse_tool_call, tools_block
+from brain.hermes_common import (call_hermes, parse_tool_call, tools_block,
+                                 business_context_block)
 from integrations import slack_bus
 from integrations.slack_bus import post_as
 from memory import store
@@ -69,9 +70,12 @@ class BaseAgent:
     tool_handlers = {}    # name -> callable(args) -> str
 
     def run_turn(self, task_text, history=None):
-        # Only teach the tool-call format when the agent actually has tools —
-        # otherwise the empty <tools> block just invites confusion.
-        system = self.system_prompt + (tools_block(self.tools) if self.tools else "")
+        # Order: shared business context first, then the agent's persona, then
+        # the tool-call format (only when the agent actually has tools — an empty
+        # <tools> block just invites confusion).
+        system = (business_context_block()
+                  + self.system_prompt
+                  + (tools_block(self.tools) if self.tools else ""))
         messages = [{"role": "system", "content": system}]
         messages += (history or [])
         messages.append({"role": "user", "content": task_text})

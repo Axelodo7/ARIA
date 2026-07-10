@@ -24,7 +24,8 @@ from datetime import datetime
 from pathlib import Path
 
 import config
-from brain.hermes_common import call_hermes, parse_tool_call, tools_block
+from brain.hermes_common import (call_hermes, parse_tool_call, tools_block,
+                                 business_context_block)
 from agents.base_agent import strip_reasoning
 from integrations import slack_bus
 
@@ -255,7 +256,9 @@ class Aria:
         num_predict = None if reasoning else 64
         keep_alive = None if reasoning else "30m"
 
-        prompt = (system_prompt or self.system_prompt) + tools_block(TOOLS)
+        # Business context first, then ARIA's persona, then the tool-call format.
+        prompt = (business_context_block()
+                  + (system_prompt or self.system_prompt) + tools_block(TOOLS))
         messages = [
             {"role": "system", "content": prompt},
             {"role": "system", "content": f"Current date and time: {datetime.now():%A %Y-%m-%d %H:%M:%S}."},

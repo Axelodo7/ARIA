@@ -11,7 +11,7 @@ import re
 from collections import deque
 
 import config
-from brain.hermes_common import call_hermes
+from brain.hermes_common import call_hermes, business_context_block
 from agents.base_agent import load_agent_prompt, strip_reasoning
 from integrations import slack_bus
 
@@ -308,11 +308,14 @@ class ConversationSession:
             "NOT identify yourself again — go straight to answering.\n\n"
         )
         system = (
-            self.persona
+            business_context_block()   # shared business knowledge first, then persona
+            + self.persona
             + "\n\nYou are in a LIVE VOICE CONVERSATION with the user. "
             + opener
             + "Your spoken replies must be 2-3 sentences MAXIMUM — never more than "
-            "three sentences, and shorter is better. If the user wants more detail, "
+            "three sentences, and shorter is better. Do NOT open with filler like "
+            "'Okay', 'Let's look at those', or 'Sure' — go straight to the answer. "
+            "If the user wants more detail, "
             "they will ask a follow-up. Do NOT use bullet lists or enumerate item by "
             "item — this is spoken dialogue, not a written report. Use the SPECIFIC "
             "facts and "

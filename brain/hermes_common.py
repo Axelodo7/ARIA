@@ -5,8 +5,45 @@ teaches Hermes our tool-call format. Every persona (ARIA + the four agents)
 routes through here.
 """
 import requests, json, re
+from pathlib import Path
 
 OLLAMA_URL = "http://localhost:11434/api/chat"
+
+# Shared business context — read ONCE from docs/user.md and cached. Prepended to
+# every agent's + ARIA's system prompt so they all reason with the same knowledge
+# of the business. Kept in a file (never inlined) so it's editable without code
+# changes. docs/user.md sits at the project root (two levels up from brain/).
+BUSINESS_CONTEXT_PATH = Path(__file__).resolve().parent.parent / "docs" / "user.md"
+_business_context = None
+
+
+def load_business_context(path=BUSINESS_CONTEXT_PATH):
+    """Return docs/user.md, read once and cached. Missing file -> '' (no crash)."""
+    global _business_context
+    if _business_context is None:
+        try:
+            _business_context = Path(path).read_text(encoding="utf-8").strip()
+        except (FileNotFoundError, OSError):
+            _business_context = ""
+    return _business_context
+
+
+def business_context_block(path=BUSINESS_CONTEXT_PATH):
+    """The <business_context> preamble to prepend to a system prompt, or '' when
+    the file is missing/empty. Framed as shared knowledge to apply (not recite),
+    with an explicit note that the agent's own persona wins on any conflict."""
+    ctx = load_business_context(path)
+    if not ctx:
+        return ""
+    return (
+        "<business_context>\n"
+        "The following is shared knowledge about the business you work for. Apply "
+        "it to your own role — do NOT recite it verbatim. It is background, not a "
+        "script. If anything here ever conflicts with your persona or task "
+        "instructions below, THOSE take precedence.\n\n"
+        f"{ctx}\n"
+        "</business_context>\n\n"
+    )
 
 
 def call_hermes(messages, model=None, temperature=0.4, num_predict=None,
