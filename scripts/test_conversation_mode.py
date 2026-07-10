@@ -54,6 +54,66 @@ def preflight():
     return True
 
 
+class _FakeSession:
+    """Stand-in for ConversationSession — no Slack, no model. Lets the driver's
+    retry/echo/exit policy be tested deterministically."""
+
+    def __init__(self):
+        self.agent, self.topic = "bobby", None
+        self.opened = self.closed = False
+        self.replies = []
+
+    def open(self):
+        self.opened = True
+        return "(fake context)"
+
+    def close(self):
+        self.closed = True
+
+    def agent_reply(self, text):
+        reply = f"reply to {text}"
+        self.replies.append(reply)
+        return reply
+
+    def mirror(self, user_text, agent_text):
+        pass
+
+
+def _scripted_capture(seq):
+    """Return a capture_turn() that yields `seq` then a clean exit if exhausted."""
+    it = iter(seq)
+
+    def capture():
+        try:
+            return next(it)
+        except StopIteration:
+            return "thanks, that's all", 2.0
+    return capture
+
+
+def _drive_case(chk, label, seq, want_reason=None, want_reason_contains=None,
+                want_spoken=(), want_not_spoken=(), want_replies=None):
+    """Run run_conversation with a scripted capture + recording speak, then assert
+    the reason, what ARIA spoke, and how many agent replies fired. Returns bool."""
+    sess = _FakeSession()
+    said = []
+    reason = conversation.run_conversation(
+        sess, _scripted_capture(seq), said.append,
+        opening_line="Connecting you to Bobby.")
+    ok = bool(reason) and sess.opened and sess.closed  # never a silent/half exit
+    if want_reason is not None:
+        ok = ok and reason == want_reason
+    if want_reason_contains is not None:
+        ok = ok and want_reason_contains in reason
+    for s in want_spoken:
+        ok = ok and s in said
+    for s in want_not_spoken:
+        ok = ok and s not in said
+    if want_replies is not None:
+        ok = ok and len(sess.replies) == want_replies
+    return chk(f"{label}  [reason={reason!r}]", ok)
+
+
 def main():
     print("=" * 64)
     print("Conversation mode — text-only test (Bobby)")
@@ -142,9 +202,49 @@ def main():
              == conversation._normalize(" thanks , that's all "))
     e6 = chk("real question @3s -> message", ct("what about cr_A?", 3.0) == "message")
 
-    print("\n" + ("ALL PASS — coherent conversation + tightened exit/silence filters."
-                  if all([r1, r2, r3, r4, r5, f0, fa, fA, fb, fB, e1, e2, e3, e4, e5, e6])
-                  else "SOME CHECKS FAILED."))
+    # --- Fix (this pass): echo rejection + no-silent-exit retry policy ----------
+    print("\n" + "=" * 64)
+    print("ECHO REJECTION + NO-SILENT-EXIT RETRY POLICY")
+    print("=" * 64)
+    recent = ["Connecting you to Bobby."]
+    g1 = chk("echo: 'connecting you to bobby' after ARIA said it -> echo",
+             ct("connecting you to bobby", 2.0, recent) == "echo")
+    g2 = chk("echo: is_echo True for the re-transcription",
+             conversation.is_echo("connecting you to bobby", recent))
+    g3 = chk("echo: a real question is NOT echo",
+             not conversation.is_echo("why are you pausing creative B?", recent))
+    g4 = chk("echo: no recent speech -> nothing is echo",
+             ct("connecting you to bobby", 2.0, None) != "echo")
+
+    # Driver-level cases (audio-free): scripted capture + recording speak.
+    d1 = _drive_case(
+        chk, "repeated hallucination: 3x 'You' then exit -> fallback prompt, NOT silent exit",
+        seq=[("You", 3.0), ("You", 3.0), ("You", 3.0), ("thanks, that's all", 2.0)],
+        want_reason="user exit phrase",
+        want_spoken=[conversation.FALLBACK_PROMPT],
+        want_not_spoken=[conversation.GIVE_UP_LINE],
+        want_replies=0)
+
+    d2 = _drive_case(
+        chk, "echo storm: ARIA's own 'connecting you to bobby' -> rejected, agent never called",
+        seq=[("connecting you to bobby", 2.0), ("thanks, that's all", 2.0)],
+        want_reason="user exit phrase",
+        want_spoken=[conversation.FALLBACK_PROMPT],
+        want_replies=0)
+
+    d3 = _drive_case(
+        chk, "full fail: 4x 'You' -> GIVE_UP line spoken, reason names it (no silent exit)",
+        seq=[("You", 3.0)] * 4,
+        want_reason_contains="unintelligible",
+        want_spoken=[conversation.GIVE_UP_LINE],
+        want_not_spoken=[conversation.BACK_TO_STANDBY],
+        want_replies=0)
+
+    all_ok = all([r1, r2, r3, r4, r5, f0, fa, fA, fb, fB, e1, e2, e3, e4, e5, e6,
+                  g1, g2, g3, g4, d1, d2, d3])
+    print("\n" + ("ALL PASS — coherent conversation + tightened exit/silence filters "
+                  "+ echo rejection + no silent exit."
+                  if all_ok else "SOME CHECKS FAILED."))
 
 
 if __name__ == "__main__":

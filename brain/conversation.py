@@ -8,6 +8,7 @@ the permanent record). Audio I/O lives in main.py; this module is audio-free so
 it's testable text-only.
 """
 import re
+from collections import deque
 
 import config
 from brain.hermes_common import call_hermes
@@ -87,17 +88,134 @@ def is_silence_hallucination(text, duration_sec=None):
     return _normalize(text) in _HALLUCINATION_PHRASES
 
 
-def classify_turn(text, duration_sec):
-    """Classify a captured turn: 'silence' (drop / extend), 'exit', or 'message'
-    (send to the agent). The hallucination check runs BEFORE the exit check, so a
-    short 'thanks' on silence is treated as silence, never as an exit."""
+ECHO_OVERLAP_THRESHOLD = 0.7  # word-overlap ratio above which a turn is ARIA's own echo
+
+
+def is_echo(text, recent_agent_speech, threshold=ECHO_OVERLAP_THRESHOLD):
+    """True if `text` is (mostly) a re-transcription of something ARIA just said —
+    i.e. ARIA's TTS bled into the mic and Whisper heard her own words back.
+
+    Compares the user transcript's word set against each recent agent utterance;
+    if their overlap covers >= `threshold` of the transcript's words, it's an echo.
+    Measuring overlap relative to the (short) transcript means a captured line that
+    is a subset of a longer agent line ("connecting you to bobby" inside
+    "Connecting you to Bobby.") still scores 1.0, while a genuine question that
+    happens to share a word or two stays well under the bar."""
+    words = set(_normalize(text).split())
+    if not words:
+        return False
+    for utt in recent_agent_speech or ():
+        u = set(_normalize(utt).split())
+        if u and len(words & u) / len(words) >= threshold:
+            return True
+    return False
+
+
+def classify_turn(text, duration_sec, recent_agent_speech=None):
+    """Classify a captured turn: 'silence' (drop / retry), 'echo' (ARIA's own TTS
+    heard back — rejected like silence), 'exit', or 'message' (send to the agent).
+    The hallucination check runs BEFORE the exit check, so a short 'thanks' on
+    silence is treated as silence, never an exit; echo is checked before exit too,
+    so an echoed sign-off word can't be mistaken for a real exit."""
     if not text or not text.strip():
         return "silence"
     if is_silence_hallucination(text, duration_sec):
         return "silence"
+    if is_echo(text, recent_agent_speech):
+        return "echo"
     if is_exit(text):
         return "exit"
     return "message"
+
+
+# --- Turn-loop driver (audio-free; main.py supplies capture + speak) ----------
+# Spoken lines and the retry policy for unintelligible input.
+FALLBACK_PROMPT = "I didn't catch that, sir. Say again?"
+GIVE_UP_LINE = "I'm having trouble hearing you, sir. Returning to standby."
+BACK_TO_STANDBY = "Back to standby."
+# After this many CONSECUTIVE silence/echo turns we give up (each of the first
+# few prompts the user to try again; the Nth ends the session gracefully).
+MAX_CONSECUTIVE_SILENCE = 4
+
+
+def run_conversation(session, capture_turn, speak, logger=None,
+                     opening_line=None, should_stop=None):
+    """Drive one conversation session's turn loop. Audio-free and fully testable:
+
+      capture_turn() -> (text, duration_sec)   one recorded+transcribed turn
+      speak(text)                              read a line aloud (blocking)
+      logger                                   optional logging.Logger
+      opening_line                             spoken before the first capture
+                                               (e.g. "Connecting you to Bobby.")
+      should_stop()                            truthy -> shut the loop down
+
+    Handles the fallback/retry policy for silence & echo, and ALWAYS ends with a
+    named exit reason (spoken + printed + logged as "[EXIT REASON: ...]"). It never
+    exits silently — a silent exit was the original bug. Returns the reason string.
+    """
+    recent = deque(maxlen=3)   # ARIA's last few utterances, for echo rejection
+
+    def say(text):
+        speak(text)
+        recent.append(text)    # track so the same words heard back count as echo
+
+    if opening_line:
+        say(opening_line)
+    session.open()
+    if logger:
+        logger.info("conversation opened with %s (topic=%s)", session.agent, session.topic)
+
+    consecutive = 0
+    reason = None
+    try:
+        while not (should_stop and should_stop()):
+            text, duration = capture_turn()
+            kind = classify_turn(text, duration, recent)
+
+            if kind in ("silence", "echo"):
+                consecutive += 1
+                note = f"  (ignored {kind} {text!r}; attempt {consecutive}/{MAX_CONSECUTIVE_SILENCE})"
+                print(note)
+                if logger:
+                    logger.info(note.strip())
+                if consecutive >= MAX_CONSECUTIVE_SILENCE:
+                    reason = f"unintelligible input ({consecutive} consecutive silence/echo turns)"
+                    break
+                say(FALLBACK_PROMPT)      # option 2: prompt, then re-open the mic
+                continue
+
+            consecutive = 0
+            if kind == "exit":
+                reason = "user exit phrase"
+                break
+
+            # message -> agent turn
+            print(f"  you->{session.agent}: {text}")
+            reply = session.agent_reply(text)
+            session.mirror(text, reply)
+            print(f"  {session.agent}: {reply}")
+            if logger:
+                logger.info("%s: %s", session.agent, reply)
+            say(reply)
+        else:
+            reason = "stop signal (shutdown)"
+    except Exception as exc:  # never let the loop die silently
+        reason = f"error: {exc!r}"
+        if logger:
+            logger.exception("conversation-mode error")
+    finally:
+        session.close()
+
+    if reason is None:
+        reason = "ended"
+    print(f"  [conversation ended] {reason}")
+    if logger:
+        logger.info("[EXIT REASON: %s]", reason)
+
+    # Closing line: the give-up message already names standby; otherwise a plain
+    # hand-back. Guarded so a give-up doesn't also say "Back to standby".
+    say(GIVE_UP_LINE if reason.startswith("unintelligible") else BACK_TO_STANDBY)
+    return reason
 
 
 class ConversationSession:

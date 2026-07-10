@@ -109,43 +109,29 @@ def main():
         time.sleep(mute_sec)
 
     def capture_conversation_turn():
-        """Record + transcribe one turn, extending ONCE past a Whisper silence
-        hallucination (Fix 2). Returns (text, kind): silence/exit/message."""
-        for attempt in range(2):
-            hud.set_state("listening")
-            audio = record.record_until_silence(max_seconds=30)  # 30s silence -> exit
-            duration = len(audio) / record.SAMPLE_RATE
-            hud.set_state("thinking")
-            text = transcribe.transcribe(audio)
-            kind = conversation.classify_turn(text, duration)
-            if kind == "silence" and text.strip() and attempt == 0:
-                print(f"  (ignored silence-hallucination {text!r} @ {duration:.1f}s; extending)")
-                continue  # one more chance before we treat it as silence
-            return text, kind
-        return "", "silence"
+        """Record + transcribe one turn. Returns (text, duration_sec). The retry
+        / silence / echo policy lives in conversation.run_conversation, which
+        classifies each captured turn — this just delivers raw audio→text."""
+        hud.set_state("listening")
+        audio = record.record_until_silence(max_seconds=30)  # 30s silence tail
+        duration = len(audio) / record.SAMPLE_RATE
+        hud.set_state("thinking")
+        return transcribe.transcribe(audio), duration
 
     def conversation_mode(agent, topic):
-        """Live back-and-forth with one agent until the user exits (or 30s of
-        silence). Fire-and-relay: agent replies, ARIA's voice reads it."""
+        """Live back-and-forth with one agent until the user exits, an echo/silence
+        storm gives up, or shutdown. The driver handles retries, echo rejection,
+        and ALWAYS logs a named exit reason (never a silent exit). Fire-and-relay:
+        agent replies, ARIA's voice reads them."""
         session = conversation.ConversationSession(agent, topic)
-        speak_then_mute(f"Connecting you to {agent.capitalize()}.")
-        session.open()
-        logger.info("conversation opened with %s (topic=%s)", agent, topic)
-        try:
-            while not stop.is_set():
-                text, kind = capture_conversation_turn()
-                if kind in ("silence", "exit"):
-                    break  # 30s silence / repeated hallucination / exit phrase
-                print(f"  you->{agent}: {text}")
-                reply = session.agent_reply(text)
-                session.mirror(text, reply)
-                print(f"  {agent}: {reply}")
-                logger.info("%s: %s", agent, reply)
-                speak_then_mute(reply)
-        finally:
-            session.close()
-            hud.set_state("speaking")
-            speak.speak("Back to standby.")
+        conversation.run_conversation(
+            session,
+            capture_turn=capture_conversation_turn,
+            speak=speak_then_mute,
+            logger=logger,
+            opening_line=f"Connecting you to {agent.capitalize()}.",
+            should_stop=stop.is_set,
+        )
 
     def voice_loop():
         """Runs in pywebview's worker thread once the HUD bridge is ready."""
