@@ -199,6 +199,10 @@ MAX_DIFF_LINES = int(_get_float("MAX_DIFF_LINES", 40))
 USE_REAL_REMOTION = _get_bool("USE_REAL_REMOTION", False)
 # Where rendered clips (stub or real) are written.
 RENDER_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "renders")
+# AI image generation via Pollinations.ai (free, no API key). When True, Ava can
+# generate images to feed the Remotion pipeline; when False the integration is
+# skipped so callers fall back. Generated PNGs land in RENDER_DIR/generated/.
+USE_POLLINATIONS = _get_bool("USE_POLLINATIONS", True)
 # Platforms Ava is allowed to schedule to — enforced in code (metricool.py).
 METRICOOL_PLATFORM_ALLOWLIST = _get_set(
     "METRICOOL_PLATFORM_ALLOWLIST", {"instagram", "tiktok", "youtube_shorts"}
