@@ -1442,7 +1442,7 @@
       fetch(url).then((res) => {
         if (!res.ok) {
           console.error(
-            "[dc-runtime] sibling fetch for <" + name + "/> failed:",
+            '[dc-runtime] sibling fetch for "' + name + '" failed:',
             url,
             "returned",
             res.status,
@@ -1456,7 +1456,7 @@
         const parsed = parseDcText(t);
         if (!parsed) {
           console.error(
-            "[dc-runtime] sibling fetch for <" + name + "/>:",
+            '[dc-runtime] sibling fetch for "' + name + '":',
             url,
             "has no <x-dc> block \u2014 not a Design Component."
           );
@@ -1468,7 +1468,7 @@
         if (parsed.js && !r.Logic) updateJs(name, parsed.js);
       }).catch(
         (e) => console.error(
-          "[dc-runtime] sibling fetch for <" + name + "/> threw:",
+          '[dc-runtime] sibling fetch for "' + name + '" threw:',
           url,
           e
         )
@@ -1673,8 +1673,8 @@
       /** Editor bridge — the encoded, `data-dc-tpl`-annotated template source.
        *  The host editor parses this into its own template DOM so it can map a
        *  rendered node (carrying the same `data-dc-tpl`) back to the source
-       *  node that emitted it. Returns the encoded form (`<sc-comp>`,
-       *  `sc-camel-*` attrs); the editor decodes on serialize. */
+       *  node that emitted it. Returns the encoded form (`sc-camel-*` attrs,
+       *  `<sc-raw-*>`/`<sc-helmet>` tags); the editor decodes on serialize. */
       __dcAnnotatedTemplate: (name) => runtime.annotatedTemplate(name),
       /** Editor bridge — the *original* (decoded) template source. */
       __dcTemplateSource: (name) => runtime.templateSource(name),
