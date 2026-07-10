@@ -119,25 +119,31 @@ def main():
     print(f"  POST_TTS_MUTE_MS = {config.POST_TTS_MUTE_MS}")
     ct = conversation.classify_turn
     ish = conversation.is_silence_hallucination
+    ie = conversation.is_exit
     f0 = chk("Fix 1: POST_TTS_MUTE_MS configured (>0)", config.POST_TTS_MUTE_MS > 0)
-    fa = chk("(a) 'You' @0.5s -> silence (not exit, not sent to agent)",
-             ct("You", 0.5) == "silence")
-    fb = chk("(b) short 'thanks' @0.8s -> silence (not exit)", ct("thanks", 0.8) == "silence")
-    # The regression that just broke: a hallucinated 'You' at a LONG duration.
-    fA = chk("[NEW] 'You' @3s -> rejected as hallucination (any duration)",
-             ish("You", 3.0) is True and ct("You", 3.0) == "silence")
-    # A longer transcript that merely contains the word is real speech, not dropped.
-    fB = chk("[NEW] 'thanks for the update' @3s -> NOT a hallucination (kept)",
-             ish("thanks for the update", 3.0) is False)
-    fc = chk("(c) 'thanks that was helpful' @3s -> exit (valid, not dropped)",
-             ct("thanks that was helpful", 3.0) == "exit")
-    fd = chk("bare 'thanks' @2s -> silence (exact hallucination, rejected any duration)",
-             ct("thanks", 2.0) == "silence")
-    fe = chk("real question @3s -> message (sent to agent)",
-             ct("what about cr_A?", 3.0) == "message")
+    # silence hallucinations — whole (normalized) transcript, any duration
+    fa = chk("'You' @0.5s -> silence", ct("You", 0.5) == "silence")
+    fA = chk("'You' @3s -> silence (rejected regardless of duration)", ct("You", 3.0) == "silence")
+    fb = chk("bare 'thanks' @2s -> silence (hallucination precedes exit)", ct("thanks", 2.0) == "silence")
+    fB = chk("'thanks for the update' -> NOT a hallucination", ish("thanks for the update") is False)
 
-    print("\n" + ("ALL PASS — coherent conversation + hardened silence filter."
-                  if all([r1, r2, r3, r4, r5, f0, fa, fb, fA, fB, fc, fd, fe])
+    # exit detection — whole (normalized) message only
+    e1 = chk("[NEW] 'thanks for the update, but tell me about cr_A' @3s -> message",
+             ct("thanks for the update, but tell me about cr_A", 3.0) == "message")
+    e2 = chk("[NEW] 'thanks, that's all' @2s -> exit",
+             ct("thanks, that's all", 2.0) == "exit")
+    e3 = chk("[NEW] 'hmm let me think about goodbye scenarios' @3s -> message",
+             ct("hmm let me think about goodbye scenarios", 3.0) == "message")
+    e4 = chk("'goodbye' -> exit; 'Actually, goodbye is a weird word...' -> not exit",
+             ie("goodbye") and not ie("Actually, goodbye is a weird word for you to use"))
+    e5 = chk("normalization equalizes variants",
+             conversation._normalize("Thanks, that's all.")
+             == conversation._normalize("Thanks that's all")
+             == conversation._normalize(" thanks , that's all "))
+    e6 = chk("real question @3s -> message", ct("what about cr_A?", 3.0) == "message")
+
+    print("\n" + ("ALL PASS — coherent conversation + tightened exit/silence filters."
+                  if all([r1, r2, r3, r4, r5, f0, fa, fA, fb, fB, e1, e2, e3, e4, e5, e6])
                   else "SOME CHECKS FAILED."))
 
 

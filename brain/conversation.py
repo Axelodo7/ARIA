@@ -34,9 +34,20 @@ _OPEN_RES = [
     re.compile(rf"chat with {_AG}\b", re.IGNORECASE),
 ]
 
-_EXIT_PHRASES = ("thanks", "thank you", "that's all", "thats all", "that is all",
-                 "we're done", "were done", "we are done", "back to aria",
-                 "goodbye", "bye")
+def _normalize(text):
+    """Lowercase, drop apostrophes, turn other punctuation into spaces, and
+    collapse whitespace — so "Thanks, that's all.", "Thanks that's all", and
+    " thanks , that's all " all normalize to "thanks thats all"."""
+    t = (text or "").lower().replace("'", "").replace("’", "")
+    t = re.sub(r"[^\w\s]", " ", t)
+    return re.sub(r"\s+", " ", t).strip()
+
+
+# Exit phrases — matched ONLY when they ARE the whole (normalized) message, so an
+# exit word inside longer speech ("thanks for the update, but ...") is NOT an exit.
+_EXIT_PHRASES = {_normalize(p) for p in (
+    "thanks", "thanks that's all", "that's all", "we're done", "back to aria",
+    "goodbye", "thanks that is all", "we are done", "bye")}
 
 
 def detect_open(text):
@@ -53,29 +64,27 @@ def detect_open(text):
 
 
 def is_exit(text):
-    """True if the user is ending the conversation."""
-    t = (text or "").strip().lower()
-    return any(re.search(r"\b" + re.escape(p) + r"\b", t) for p in _EXIT_PHRASES)
+    """True ONLY when the whole (normalized) message is an exit phrase — never
+    when an exit word merely appears inside a longer utterance."""
+    return _normalize(text) in _EXIT_PHRASES
 
 
-# Whisper's known hallucinations on (near-)silence.
-_HALLUCINATION_PHRASES = {"you", "you.", "thank you", "thank you.", "thanks",
-                          "you know", "you know.", "bye", "bye."}
+# Whisper's silence hallucinations — matched on the whole (normalized) transcript.
+_HALLUCINATION_PHRASES = {_normalize(p) for p in
+                          ("you", "thank you", "thanks", "you know", "bye")}
 
 
 def is_silence_hallucination(text, duration_sec=None):
-    """True if the ENTIRE transcript is exactly one of Whisper's silence
+    """True if the ENTIRE (normalized) transcript is one of Whisper's silence
     hallucinations — rejected REGARDLESS of duration. If Whisper heard only
     'You' / 'thanks' / 'you know' and nothing else, it's noise, even when VAD held
-    the mic open on ambient sound (the case that slipped through the old length
-    gate). A LONGER transcript that merely contains such a word (e.g. 'thanks for
-    the update') is real speech and is kept.
+    the mic open on ambient sound. A LONGER transcript that merely contains such a
+    word ('thanks for the update') is real speech and is kept.
 
     `duration_sec` is accepted for call-site compatibility; the exact-whole-
-    transcript match now supersedes the old < 1.5s length gate.
+    transcript match supersedes the old < 1.5s length gate.
     """
-    t = (text or "").strip().lower()
-    return t in _HALLUCINATION_PHRASES
+    return _normalize(text) in _HALLUCINATION_PHRASES
 
 
 def classify_turn(text, duration_sec):
