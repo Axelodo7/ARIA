@@ -7,3 +7,6 @@ requests
 
 # Step 6 — daemon scheduler.
 apscheduler
+
+# Step 6 — ElevenLabs TTS (ARIA voice). Not installed until the Step 6 build.
+elevenlabs
