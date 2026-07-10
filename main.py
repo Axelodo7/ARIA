@@ -52,6 +52,7 @@ def main():
     # Heavy imports here (not at module top) so the progress messages are
     # accurate — each loads its resident model on the main thread before the GUI.
     from brain.aria_agent import Aria, warmup
+    from brain import conversation
     print("  warming up the fast model...")
     warmup()
     print("  loading Whisper model...")
@@ -80,6 +81,13 @@ def main():
         print(f"  you : {text}")
         logger.info("user: %s", text)
 
+        # Conversation mode? (deterministic; dispatch phrases don't match these,
+        # so "ask Bobby about X" still dispatches normally via think().)
+        opened = conversation.detect_open(text)
+        if opened:
+            conversation_mode(*opened)
+            return
+
         result = aria.think(text)               # deterministic routing or model
         reply = result.get("reply", "")
         print(f"  aria: {reply}")
@@ -89,6 +97,36 @@ def main():
         # just speak the confirmation. Direct answers speak the reply. Same path.
         hud.set_state("speaking")
         speak.speak(reply)
+
+    def conversation_mode(agent, topic):
+        """Live back-and-forth with one agent until the user exits (or 30s of
+        silence). Fire-and-relay: agent replies, ARIA's voice reads it."""
+        hud.set_state("speaking")
+        speak.speak(f"Connecting you to {agent.capitalize()}.")
+        session = conversation.ConversationSession(agent, topic)
+        session.open()
+        logger.info("conversation opened with %s (topic=%s)", agent, topic)
+        try:
+            while not stop.is_set():
+                hud.set_state("listening")
+                audio = record.record_until_silence(max_seconds=30)  # 30s silence -> exit
+                hud.set_state("thinking")
+                text = transcribe.transcribe(audio)
+                if not text.strip():
+                    break  # timed out (no speech in 30s)
+                print(f"  you->{agent}: {text}")
+                if conversation.is_exit(text):
+                    break
+                reply = session.agent_reply(text)
+                session.mirror(text, reply)
+                print(f"  {agent}: {reply}")
+                logger.info("%s: %s", agent, reply)
+                hud.set_state("speaking")
+                speak.speak(reply)
+        finally:
+            session.close()
+            hud.set_state("speaking")
+            speak.speak("Back to standby.")
 
     def voice_loop():
         """Runs in pywebview's worker thread once the HUD bridge is ready."""

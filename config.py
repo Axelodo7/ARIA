@@ -80,6 +80,10 @@ CHANNELS = {
     "ads": "#ads",
     "approvals": "#approvals",
     "ops": "#ops",          # daemon health/error channel
+    "chat_sarah": "#chat-sarah",   # conversation-mode transcript channels
+    "chat_bobby": "#chat-bobby",
+    "chat_ava": "#chat-ava",
+    "chat_tom": "#chat-tom",
 }
 
 # Channel IDs (e.g. "C0123ABCD") are required by conversations_history and
@@ -93,6 +97,10 @@ CHANNEL_IDS = {
     "ads": os.environ.get("CHANNEL_ID_ADS"),
     "approvals": os.environ.get("CHANNEL_ID_APPROVALS"),
     "ops": os.environ.get("CHANNEL_ID_OPS"),
+    "chat_sarah": os.environ.get("CHANNEL_ID_CHAT_SARAH"),
+    "chat_bobby": os.environ.get("CHANNEL_ID_CHAT_BOBBY"),
+    "chat_ava": os.environ.get("CHANNEL_ID_CHAT_AVA"),
+    "chat_tom": os.environ.get("CHANNEL_ID_CHAT_TOM"),
 }
 
 # --- Personas ---------------------------------------------------------------
@@ -129,6 +137,12 @@ AGENT_MODELS = {
     # ARIA_reasoning.
     "ARIA": "hermes3",
     "ARIA_reasoning": "deepseek-r1:14b",
+}
+
+# Conversation mode (Step 7A) uses a FAST model for live back-and-forth chat —
+# NOT each agent's heavier scheduled-cycle model (which stays deepseek-r1:14b).
+AGENT_CONVERSATION_MODELS = {
+    "Sarah": "hermes3", "Bobby": "hermes3", "Ava": "hermes3", "Tom": "hermes3",
 }
 
 # --- Budget guardrails ------------------------------------------------------
