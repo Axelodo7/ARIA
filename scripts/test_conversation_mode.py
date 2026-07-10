@@ -15,6 +15,7 @@ not exist yet); context reads from the real #ads channel. Needs Ollama + hermes3
 import os
 import re
 import sys
+import time
 
 try:
     sys.stdout.reconfigure(encoding="utf-8")
@@ -49,8 +50,12 @@ def preflight():
     except requests.exceptions.RequestException:
         print("[x] Ollama not reachable. Start `ollama serve`.")
         return False
-    if not any(m.get("name", "").startswith("hermes3") for m in r.json().get("models", [])):
-        print("[x] hermes3 not found. `ollama pull hermes3`.")
+    names = [m.get("name", "") for m in r.json().get("models", [])]
+    want = config.CONVERSATION_SPEED_MODEL
+    # ollama tags may or may not carry a ":latest" tag; match on the base name.
+    base = want.split(":")[0]
+    if not any(n == want or n.startswith(base) for n in names):
+        print(f"[x] conversation model {want!r} not found. `ollama pull {want}`.")
         return False
     return True
 
@@ -160,14 +165,19 @@ def main():
     ctx_has_roas = "roas" in ctx.lower()
     print(f"\ncontext loaded: {len(ctx)} chars | has cr_B={ctx_has_crb} | has ROAS={ctx_has_roas}")
 
-    # 3) run the 4 turns
-    replies = []
+    # 3) run the 4 turns (timed — conversation-mode latency is the whole point)
+    print(f"\nconversation model: {session.model}  (num_predict=60)")
+    replies, times = [], []
     for q in TURNS:
+        t0 = time.perf_counter()
         reply = session.agent_reply(q)
+        dt = time.perf_counter() - t0
         session.mirror(q, reply)
         replies.append(reply)
+        times.append(dt)
         print(f"\n  You  : {q}")
         print(f"  Bobby: {reply}")
+        print(f"  [gen {dt:.1f}s]")
 
     # 4) exit
     exited = conversation.is_exit("thanks")
@@ -207,6 +217,8 @@ def main():
     i3 = chk("all Bobby replies stay within 3 content sentences (<=3)", all(c <= 3 for c in counts))
     i4 = chk("no bullet lists in replies",
              not any(re.search(r"(?m)^\s*[-*•]\s", r) for r in replies))
+    print(f"  generation time per reply: {[f'{t:.1f}s' for t in times]} "
+          f"(avg {sum(times)/len(times):.1f}s) on {session.model}")
 
     # Sarah opener — a short second conversation (one turn is enough to check ID).
     sarah = conversation.ConversationSession("sarah", None)

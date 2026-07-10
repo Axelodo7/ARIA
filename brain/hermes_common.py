@@ -9,11 +9,16 @@ import requests, json, re
 OLLAMA_URL = "http://localhost:11434/api/chat"
 
 
-def call_hermes(messages, model=None, temperature=0.4, num_predict=None, keep_alive=None):
+def call_hermes(messages, model=None, temperature=0.4, num_predict=None,
+                keep_alive=None, think=None):
     # model is passed down per-agent (see config.AGENT_MODELS). Falls back to
     # hermes3 for backward compatibility when a caller doesn't specify one.
     # num_predict caps generated tokens (used for ARIA's terse fast replies);
     # keep_alive keeps the model resident so cold starts don't recur.
+    # think: set False to disable native reasoning on thinking models (e.g.
+    # qwen3.5) — otherwise they burn the whole token budget on a `thinking` field
+    # and return empty content. Only sent when explicitly set, so non-thinking
+    # models (hermes3) are unaffected.
     options = {"temperature": temperature}
     if num_predict is not None:
         options["num_predict"] = num_predict
@@ -21,6 +26,8 @@ def call_hermes(messages, model=None, temperature=0.4, num_predict=None, keep_al
                "stream": False, "options": options}
     if keep_alive is not None:
         payload["keep_alive"] = keep_alive
+    if think is not None:
+        payload["think"] = think
     r = requests.post(OLLAMA_URL, json=payload)
     return r.json()["message"]["content"]
 

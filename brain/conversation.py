@@ -218,6 +218,22 @@ def run_conversation(session, capture_turn, speak, logger=None,
     return reason
 
 
+def _id_opener_re(name):
+    """Match a leading '<Name> here[, sir].' identification line (any trailing
+    punctuation/dash)."""
+    return re.compile(
+        rf'^\s*["\']?{re.escape(name)}\s+here(?:,?\s*sir)?\s*[.!?,:;–—-]*\s*',
+        re.IGNORECASE)
+
+
+def _has_identification(text, name):
+    return bool(_id_opener_re(name).match(text or ""))
+
+
+def _strip_identification(text, name):
+    return _id_opener_re(name).sub("", text or "", count=1).lstrip()
+
+
 class ConversationSession:
     """One ephemeral chat session with an agent. History lives in RAM only."""
 
@@ -225,7 +241,8 @@ class ConversationSession:
         self.agent = agent.lower()
         self.name = self.agent.capitalize()
         self.topic = topic
-        self.model = config.AGENT_CONVERSATION_MODELS.get(self.name, "hermes3")
+        self.model = (config.AGENT_CONVERSATION_MODELS.get(self.name)
+                      or config.CONVERSATION_SPEED_MODEL)
         self.persona = load_agent_prompt(self.name)
         self.history = []       # [{role, content}] — RAM only, dropped on close
         self.context = ""       # loaded once in open()
@@ -272,8 +289,21 @@ class ConversationSession:
         messages = [{"role": "system", "content": system}]
         messages += self.history
         messages.append({"role": "user", "content": user_text})
+        # think=False: conversation mode never wants native reasoning tokens —
+        # on thinking models (qwen3.5) they'd consume the whole budget and return
+        # empty content; on non-thinking models it's a harmless no-op.
         reply = strip_reasoning(
-            call_hermes(messages, model=self.model, num_predict=120, keep_alive="30m"))
+            call_hermes(messages, model=self.model, num_predict=60,
+                        keep_alive="30m", think=False))
+        # Enforce the identification rule DETERMINISTICALLY — the speed model is
+        # swappable and sometimes small, so don't trust it to comply: exactly one
+        # identification line, on the first turn only. Add it if the model forgot;
+        # strip a repeat if the model added one on a later turn.
+        if first_turn:
+            if not _has_identification(reply, self.name):
+                reply = f"{self.name} here, sir. {reply.lstrip()}"
+        else:
+            reply = _strip_identification(reply, self.name)
         self.history.append({"role": "user", "content": user_text})
         self.history.append({"role": "assistant", "content": reply})
         return reply

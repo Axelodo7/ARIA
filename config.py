@@ -151,11 +151,20 @@ AGENT_MODELS = {
     "ARIA_reasoning": "deepseek-r1:14b",
 }
 
-# Conversation mode (Step 7A) uses a FAST model for live back-and-forth chat —
-# NOT each agent's heavier scheduled-cycle model (which stays deepseek-r1:14b).
-AGENT_CONVERSATION_MODELS = {
-    "Sarah": "hermes3", "Bobby": "hermes3", "Ava": "hermes3", "Tom": "hermes3",
-}
+# Conversation mode (Step 7A) uses a FAST LOCAL model for live back-and-forth
+# chat — NOT each agent's heavier scheduled-cycle model (deepseek-r1:14b stays).
+# CONVERSATION_SPEED_MODEL is the single knob for the speed/accuracy trade: swap
+# it to compare local models without touching code. Measured on this box with a
+# real #ads context (num_predict=60, think disabled):
+#   qwen3.5:0.8b  ~3-4s/reply but FABRICATES (wrong ROAS %, invented budgets) and
+#                 confuses who it's talking to — too small to stay grounded.
+#   gemma3        ~5s warm, numbers accurate and grounded — best speed/accuracy.
+#   hermes3       ~15-20s, accurate but too slow for live voice.
+# gemma3 wins: ~3-4x faster than hermes3 while staying grounded. All local.
+CONVERSATION_SPEED_MODEL = os.environ.get("CONVERSATION_SPEED_MODEL", "gemma3")
+# Optional per-agent overrides; any agent NOT listed falls back to
+# CONVERSATION_SPEED_MODEL. Leave empty to run every agent on the speed model.
+AGENT_CONVERSATION_MODELS = {}
 
 # --- Budget guardrails ------------------------------------------------------
 # Hard caps enforced in CODE (integrations/ads_platform.py), not just in the
