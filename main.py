@@ -16,6 +16,7 @@ import os
 import signal
 import sys
 import threading
+import time
 from logging.handlers import RotatingFileHandler
 
 try:
@@ -98,31 +99,49 @@ def main():
         hud.set_state("speaking")
         speak.speak(reply)
 
+    mute_sec = config.POST_TTS_MUTE_MS / 1000.0
+
+    def speak_then_mute(text):
+        """Speak, then stay muted briefly so speaker bleed isn't captured as the
+        next turn (Fix 1)."""
+        hud.set_state("speaking")
+        speak.speak(text)
+        time.sleep(mute_sec)
+
+    def capture_conversation_turn():
+        """Record + transcribe one turn, extending ONCE past a Whisper silence
+        hallucination (Fix 2). Returns (text, kind): silence/exit/message."""
+        for attempt in range(2):
+            hud.set_state("listening")
+            audio = record.record_until_silence(max_seconds=30)  # 30s silence -> exit
+            duration = len(audio) / record.SAMPLE_RATE
+            hud.set_state("thinking")
+            text = transcribe.transcribe(audio)
+            kind = conversation.classify_turn(text, duration)
+            if kind == "silence" and text.strip() and attempt == 0:
+                print(f"  (ignored silence-hallucination {text!r} @ {duration:.1f}s; extending)")
+                continue  # one more chance before we treat it as silence
+            return text, kind
+        return "", "silence"
+
     def conversation_mode(agent, topic):
         """Live back-and-forth with one agent until the user exits (or 30s of
         silence). Fire-and-relay: agent replies, ARIA's voice reads it."""
-        hud.set_state("speaking")
-        speak.speak(f"Connecting you to {agent.capitalize()}.")
         session = conversation.ConversationSession(agent, topic)
+        speak_then_mute(f"Connecting you to {agent.capitalize()}.")
         session.open()
         logger.info("conversation opened with %s (topic=%s)", agent, topic)
         try:
             while not stop.is_set():
-                hud.set_state("listening")
-                audio = record.record_until_silence(max_seconds=30)  # 30s silence -> exit
-                hud.set_state("thinking")
-                text = transcribe.transcribe(audio)
-                if not text.strip():
-                    break  # timed out (no speech in 30s)
+                text, kind = capture_conversation_turn()
+                if kind in ("silence", "exit"):
+                    break  # 30s silence / repeated hallucination / exit phrase
                 print(f"  you->{agent}: {text}")
-                if conversation.is_exit(text):
-                    break
                 reply = session.agent_reply(text)
                 session.mirror(text, reply)
                 print(f"  {agent}: {reply}")
                 logger.info("%s: %s", agent, reply)
-                hud.set_state("speaking")
-                speak.speak(reply)
+                speak_then_mute(reply)
         finally:
             session.close()
             hud.set_state("speaking")

@@ -58,6 +58,34 @@ def is_exit(text):
     return any(re.search(r"\b" + re.escape(p) + r"\b", t) for p in _EXIT_PHRASES)
 
 
+# Whisper's known hallucinations on (near-)silence. Length-gated so a real
+# end-of-turn "thanks" / "bye" is NOT dropped — only these exact phrases from a
+# very short capture (VAD essentially triggered on silence) count.
+_HALLUCINATION_PHRASES = {"you", "you.", "thank you", "thank you.", "thanks",
+                          "you know", "you know.", "bye", "bye."}
+HALLUCINATION_MAX_SEC = 1.5
+
+
+def is_silence_hallucination(text, duration_sec):
+    """True if `text` is one of Whisper's silence hallucinations AND the capture
+    was too short to be real speech (< HALLUCINATION_MAX_SEC)."""
+    t = (text or "").strip().lower()
+    return t in _HALLUCINATION_PHRASES and duration_sec < HALLUCINATION_MAX_SEC
+
+
+def classify_turn(text, duration_sec):
+    """Classify a captured turn: 'silence' (drop / extend), 'exit', or 'message'
+    (send to the agent). The hallucination check runs BEFORE the exit check, so a
+    short 'thanks' on silence is treated as silence, never as an exit."""
+    if not text or not text.strip():
+        return "silence"
+    if is_silence_hallucination(text, duration_sec):
+        return "silence"
+    if is_exit(text):
+        return "exit"
+    return "message"
+
+
 class ConversationSession:
     """One ephemeral chat session with an agent. History lives in RAM only."""
 

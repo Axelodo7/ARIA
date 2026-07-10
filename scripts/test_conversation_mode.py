@@ -111,8 +111,28 @@ def main():
     r3 = chk("Bobby references cr_B across turns", mentions_crb)
     r4 = chk("Bobby cites ROAS / real numbers (used the context)", mentions_roas)
     r5 = chk("exit phrase 'thanks' ended the session", exited)
-    print("\n" + ("ALL PASS — coherent, context-grounded 4-turn conversation."
-                  if all([r1, r2, r3, r4, r5]) else "SOME CHECKS FAILED."))
+
+    # --- Fix 1 + Fix 2: mute config + silence-hallucination classification ----
+    print("\n" + "=" * 64)
+    print("UX FIXES — post-TTS mute + Whisper silence-hallucination rejection")
+    print("=" * 64)
+    print(f"  POST_TTS_MUTE_MS = {config.POST_TTS_MUTE_MS}")
+    ct = conversation.classify_turn
+    f0 = chk("Fix 1: POST_TTS_MUTE_MS configured (>0)", config.POST_TTS_MUTE_MS > 0)
+    fa = chk("(a) 'You' @0.5s -> silence (not exit, not sent to agent)",
+             ct("You", 0.5) == "silence")
+    fb = chk("(b) short 'thanks' @0.8s -> silence (hallucination, not exit)",
+             ct("thanks", 0.8) == "silence")
+    fc = chk("(c) 'thanks that was helpful' @3s -> exit (valid)",
+             ct("thanks that was helpful", 3.0) == "exit")
+    fd = chk("nuance: bare 'thanks' @2s (long) -> exit (length gate only drops short)",
+             ct("thanks", 2.0) == "exit")
+    fe = chk("real question @3s -> message (sent to agent)",
+             ct("what about cr_A?", 3.0) == "message")
+
+    print("\n" + ("ALL PASS — coherent conversation + both UX fixes working."
+                  if all([r1, r2, r3, r4, r5, f0, fa, fb, fc, fd, fe])
+                  else "SOME CHECKS FAILED."))
 
 
 if __name__ == "__main__":

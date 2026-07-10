@@ -63,6 +63,10 @@ VAD_SILENCE_LIMIT_SEC = _get_float("VAD_SILENCE_LIMIT_SEC", 1.2)
 # openWakeWord confidence (0-1) above which the wake word counts as detected.
 WAKE_WORD_THRESHOLD = _get_float("WAKE_WORD_THRESHOLD", 0.5)
 
+# Stay muted this long after ARIA finishes speaking (conversation mode) before
+# re-opening the mic, so residual speaker audio isn't captured as the next turn.
+POST_TTS_MUTE_MS = int(_get_float("POST_TTS_MUTE_MS", 500))
+
 # --- Global run mode --------------------------------------------------------
 # DRY_RUN defaults to True: no consequential action executes for real unless
 # this is explicitly turned off. Write operations to Slack are logged instead
