@@ -59,6 +59,10 @@ TTS_MODEL = os.environ.get("TTS_MODEL", "eleven_turbo_v2")
 VAD_AGGRESSIVENESS = int(_get_float("VAD_AGGRESSIVENESS", 2))
 VAD_SILENCE_LIMIT_SEC = _get_float("VAD_SILENCE_LIMIT_SEC", 1.2)
 
+# --- Wake word (ARIA — Step 6) ----------------------------------------------
+# openWakeWord confidence (0-1) above which the wake word counts as detected.
+WAKE_WORD_THRESHOLD = _get_float("WAKE_WORD_THRESHOLD", 0.5)
+
 # --- Global run mode --------------------------------------------------------
 # DRY_RUN defaults to True: no consequential action executes for real unless
 # this is explicitly turned off. Write operations to Slack are logged instead

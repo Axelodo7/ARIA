@@ -25,3 +25,7 @@ webrtcvad-wheels
 # pythonnet and the Edge WebView2 runtime (preinstalled on most machines).
 pywebview
 pythonnet
+
+# Step 6 — wake word (openWakeWord + onnxruntime for the ONNX inference path).
+openwakeword
+onnxruntime
