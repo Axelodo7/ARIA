@@ -118,20 +118,26 @@ def main():
     print("=" * 64)
     print(f"  POST_TTS_MUTE_MS = {config.POST_TTS_MUTE_MS}")
     ct = conversation.classify_turn
+    ish = conversation.is_silence_hallucination
     f0 = chk("Fix 1: POST_TTS_MUTE_MS configured (>0)", config.POST_TTS_MUTE_MS > 0)
     fa = chk("(a) 'You' @0.5s -> silence (not exit, not sent to agent)",
              ct("You", 0.5) == "silence")
-    fb = chk("(b) short 'thanks' @0.8s -> silence (hallucination, not exit)",
-             ct("thanks", 0.8) == "silence")
-    fc = chk("(c) 'thanks that was helpful' @3s -> exit (valid)",
+    fb = chk("(b) short 'thanks' @0.8s -> silence (not exit)", ct("thanks", 0.8) == "silence")
+    # The regression that just broke: a hallucinated 'You' at a LONG duration.
+    fA = chk("[NEW] 'You' @3s -> rejected as hallucination (any duration)",
+             ish("You", 3.0) is True and ct("You", 3.0) == "silence")
+    # A longer transcript that merely contains the word is real speech, not dropped.
+    fB = chk("[NEW] 'thanks for the update' @3s -> NOT a hallucination (kept)",
+             ish("thanks for the update", 3.0) is False)
+    fc = chk("(c) 'thanks that was helpful' @3s -> exit (valid, not dropped)",
              ct("thanks that was helpful", 3.0) == "exit")
-    fd = chk("nuance: bare 'thanks' @2s (long) -> exit (length gate only drops short)",
-             ct("thanks", 2.0) == "exit")
+    fd = chk("bare 'thanks' @2s -> silence (exact hallucination, rejected any duration)",
+             ct("thanks", 2.0) == "silence")
     fe = chk("real question @3s -> message (sent to agent)",
              ct("what about cr_A?", 3.0) == "message")
 
-    print("\n" + ("ALL PASS — coherent conversation + both UX fixes working."
-                  if all([r1, r2, r3, r4, r5, f0, fa, fb, fc, fd, fe])
+    print("\n" + ("ALL PASS — coherent conversation + hardened silence filter."
+                  if all([r1, r2, r3, r4, r5, f0, fa, fb, fA, fB, fc, fd, fe])
                   else "SOME CHECKS FAILED."))
 
 

@@ -58,19 +58,24 @@ def is_exit(text):
     return any(re.search(r"\b" + re.escape(p) + r"\b", t) for p in _EXIT_PHRASES)
 
 
-# Whisper's known hallucinations on (near-)silence. Length-gated so a real
-# end-of-turn "thanks" / "bye" is NOT dropped — only these exact phrases from a
-# very short capture (VAD essentially triggered on silence) count.
+# Whisper's known hallucinations on (near-)silence.
 _HALLUCINATION_PHRASES = {"you", "you.", "thank you", "thank you.", "thanks",
                           "you know", "you know.", "bye", "bye."}
-HALLUCINATION_MAX_SEC = 1.5
 
 
-def is_silence_hallucination(text, duration_sec):
-    """True if `text` is one of Whisper's silence hallucinations AND the capture
-    was too short to be real speech (< HALLUCINATION_MAX_SEC)."""
+def is_silence_hallucination(text, duration_sec=None):
+    """True if the ENTIRE transcript is exactly one of Whisper's silence
+    hallucinations — rejected REGARDLESS of duration. If Whisper heard only
+    'You' / 'thanks' / 'you know' and nothing else, it's noise, even when VAD held
+    the mic open on ambient sound (the case that slipped through the old length
+    gate). A LONGER transcript that merely contains such a word (e.g. 'thanks for
+    the update') is real speech and is kept.
+
+    `duration_sec` is accepted for call-site compatibility; the exact-whole-
+    transcript match now supersedes the old < 1.5s length gate.
+    """
     t = (text or "").strip().lower()
-    return t in _HALLUCINATION_PHRASES and duration_sec < HALLUCINATION_MAX_SEC
+    return t in _HALLUCINATION_PHRASES
 
 
 def classify_turn(text, duration_sec):
