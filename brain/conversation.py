@@ -293,7 +293,7 @@ class ConversationSession:
         # on thinking models (qwen3.5) they'd consume the whole budget and return
         # empty content; on non-thinking models it's a harmless no-op.
         reply = strip_reasoning(
-            call_hermes(messages, model=self.model, num_predict=60,
+            call_hermes(messages, model=self.model, num_predict=80,
                         keep_alive="30m", think=False))
         # Enforce the identification rule DETERMINISTICALLY — the speed model is
         # swappable and sometimes small, so don't trust it to comply: exactly one

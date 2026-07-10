@@ -166,7 +166,7 @@ def main():
     print(f"\ncontext loaded: {len(ctx)} chars | has cr_B={ctx_has_crb} | has ROAS={ctx_has_roas}")
 
     # 3) run the 4 turns (timed — conversation-mode latency is the whole point)
-    print(f"\nconversation model: {session.model}  (num_predict=60)")
+    print(f"\nconversation model: {session.model}  (num_predict=80)")
     replies, times = [], []
     for q in TURNS:
         t0 = time.perf_counter()
