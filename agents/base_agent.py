@@ -13,6 +13,7 @@ import config
 from brain.hermes_common import call_hermes, parse_tool_call, tools_block
 from integrations import slack_bus
 from integrations.slack_bus import post_as
+from memory import store
 
 # agent_prompts.md sits at the project root (one level up from agents/).
 PROMPTS_PATH = Path(__file__).resolve().parent.parent / "agent_prompts.md"
@@ -90,6 +91,15 @@ class BaseAgent:
 
     def post(self, text):
         post_as(self.name, self.icon, self.channel, text)
+
+    # --- Slack read bookmark (so agents don't re-process old messages) -------
+    def get_bookmark(self):
+        """Return this agent's last processed Slack ts, or None."""
+        return store.get_bookmark(self.name)
+
+    def set_bookmark(self, ts):
+        """Record this agent's last processed Slack ts."""
+        return store.set_bookmark(self.name, ts)
 
     def process_pending_approvals(self):
         """Read this agent's own #approvals messages and report their status.

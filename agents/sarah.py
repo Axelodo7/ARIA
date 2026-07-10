@@ -15,11 +15,17 @@ from pathlib import Path
 
 import config
 from agents.base_agent import BaseAgent, load_agent_prompt, strip_reasoning
-from integrations.slack_bus import read_channel
+from integrations import slack_bus
 
 # --- Paths ------------------------------------------------------------------
 _ROOT = Path(__file__).resolve().parent.parent
 NOTES_PATH = _ROOT / "memory" / "sarah_notes.jsonl"
+
+# Slack system events that are never user feedback (joins, topic changes, ...).
+_SYSTEM_SUBTYPES = {
+    "channel_join", "channel_leave", "channel_topic", "channel_purpose",
+    "channel_name", "channel_archive", "channel_unarchive",
+}
 
 
 # --- Tool spec (format injected separately by tools_block) -------------------
@@ -70,25 +76,35 @@ class Sarah(BaseAgent):
         feedback_id = config.CHANNEL_IDS.get("feedback")
         if not feedback_id:
             raise RuntimeError(
-                "CHANNEL_ID_FEEDBACK is not set in .env — read_channel needs a "
+                "CHANNEL_ID_FEEDBACK is not set in .env — reading Slack needs a "
                 "channel ID, not '#feedback'."
             )
 
-        messages = read_channel(feedback_id, limit=limit)
-        items = [m.strip() for m in messages if m and m.strip()]
+        # Only process feedback newer than last cycle's bookmark, so already-
+        # digested messages are never re-processed. history() gives us the ts of
+        # each message, which we need to advance the bookmark.
+        since = self.get_bookmark()
+        messages = slack_bus.history(feedback_id, limit=limit)  # newest-first dicts
+        fresh = [m for m in messages
+                 if (m.get("text") or "").strip()
+                 and m.get("subtype") not in _SYSTEM_SUBTYPES  # skip join/leave etc.
+                 and (since is None or float(m.get("ts", "0")) > float(since))]
+        fresh.sort(key=lambda m: float(m.get("ts", "0")))  # oldest -> newest
 
-        if not items:
+        if not fresh:
             digest = "No new patterns since last digest."
             self.post(digest)
             return digest
 
-        joined = "\n".join(f"- {m}" for m in items)
+        joined = "\n".join(f"- {m['text']}" for m in fresh)
         task = (
-            "Here are the most recent messages from the #feedback channel "
-            "(newest first). Read them and produce your digest for "
-            "#support-intel now, following your instructions.\n\n"
+            "Here are the new messages from the #feedback channel (oldest "
+            "first). Read them and produce your digest for #support-intel now, "
+            "following your instructions.\n\n"
             f"{joined}"
         )
         digest = strip_reasoning(self.run_turn(task))
         self.post(digest)
+        # Advance the bookmark only after a successful cycle.
+        self.set_bookmark(fresh[-1]["ts"])
         return digest

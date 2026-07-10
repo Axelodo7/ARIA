@@ -32,14 +32,19 @@ def post_as(name, icon, channel, text):
     return resp["ts"]
 
 
-def read_channel(channel_id, limit=50):
-    """Return the most recent message texts (newest first) from a channel.
+def read_channel(channel_id, limit=50, since_ts=None):
+    """Return recent message texts (newest first) from a channel.
 
     Requires a channel ID (not "#name") — that's what conversations_history
-    accepts. Returns a list of message text strings.
+    accepts. If `since_ts` is given, only messages strictly newer than that ts
+    are returned, so callers can skip content they've already processed.
+    Returns a list of message text strings.
     """
     resp = client.conversations_history(channel=channel_id, limit=limit)
-    return [m.get("text", "") for m in resp["messages"]]
+    messages = resp["messages"]
+    if since_ts is not None:
+        messages = [m for m in messages if float(m.get("ts", "0")) > float(since_ts)]
+    return [m.get("text", "") for m in messages]
 
 
 def history(channel_id, limit=50):
