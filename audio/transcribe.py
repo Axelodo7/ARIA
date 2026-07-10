@@ -5,10 +5,18 @@ per-utterance latency is just inference (~1-2s), not a reload. Extracted from
 scripts/test_stt.py.
 """
 import os
+import sys
 
 from faster_whisper import WhisperModel
 
-MODEL_SIZE = os.environ.get("WHISPER_MODEL_SIZE", "small.en")
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
+
+import config
+
+# Model size lives in config (default medium.en; override via WHISPER_MODEL_SIZE).
+MODEL_SIZE = config.WHISPER_MODEL_SIZE
 
 # Resident model — loaded on first import of this module.
 _model = WhisperModel(MODEL_SIZE, device="cpu", compute_type="int8")

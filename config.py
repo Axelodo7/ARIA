@@ -63,6 +63,14 @@ VAD_SILENCE_LIMIT_SEC = _get_float("VAD_SILENCE_LIMIT_SEC", 1.2)
 # openWakeWord confidence (0-1) above which the wake word counts as detected.
 WAKE_WORD_THRESHOLD = _get_float("WAKE_WORD_THRESHOLD", 0.5)
 
+# --- Speech-to-text (ARIA — Step 6) -----------------------------------------
+# faster-whisper model size. medium.en transcribes noticeably more accurately
+# than small.en (fewer dropped/garbled words on real speech), at the cost of a
+# larger one-time download (~1.5GB) and a little more per-utterance latency.
+# If latency is a problem on lower-end hardware, override back to "small.en"
+# (or "base.en") via the WHISPER_MODEL_SIZE env var — no code change needed.
+WHISPER_MODEL_SIZE = os.environ.get("WHISPER_MODEL_SIZE", "medium.en")
+
 # Stay muted this long after ARIA finishes speaking (conversation mode) before
 # re-opening the mic, so residual speaker audio isn't captured as the next turn.
 POST_TTS_MUTE_MS = int(_get_float("POST_TTS_MUTE_MS", 500))

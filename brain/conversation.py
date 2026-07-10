@@ -245,20 +245,35 @@ class ConversationSession:
     # --- the turn -----------------------------------------------------------
     def agent_reply(self, user_text):
         """Produce the agent's reply to a user turn and append both to history."""
+        first_turn = not self.history  # nothing said yet -> this is turn 1
+        opener = (
+            f'This is the FIRST turn of the conversation. You MUST begin your reply '
+            f'with a brief, natural identification line — "{self.name} here." or '
+            f'"{self.name} here, sir." — then a short pause, then address the topic. '
+            "Do this ONLY on this first turn.\n\n"
+            if first_turn else
+            "You have already introduced yourself earlier in this conversation. Do "
+            "NOT identify yourself again — go straight to answering.\n\n"
+        )
         system = (
             self.persona
-            + "\n\nYou are in a LIVE VOICE CONVERSATION with the user. Reply "
-            "conversationally in one to three sentences (it's read aloud). Use the "
-            "SPECIFIC facts and numbers from the CONTEXT below — quote real values "
-            "(creative ids, ROAS, CPA, counts); never invent figures. If the "
-            "context doesn't cover something, say so briefly.\n\n"
+            + "\n\nYou are in a LIVE VOICE CONVERSATION with the user. "
+            + opener
+            + "Your spoken replies must be 2-3 sentences MAXIMUM — never more than "
+            "three sentences, and shorter is better. If the user wants more detail, "
+            "they will ask a follow-up. Do NOT use bullet lists or enumerate item by "
+            "item — this is spoken dialogue, not a written report. Use the SPECIFIC "
+            "facts and "
+            "numbers from the CONTEXT below — quote real values (creative ids, ROAS, "
+            "CPA, counts); never invent figures. If the context doesn't cover "
+            "something, say so briefly.\n\n"
             f"CONTEXT (loaded once at the start of this conversation):\n{self.context}"
         )
         messages = [{"role": "system", "content": system}]
         messages += self.history
         messages.append({"role": "user", "content": user_text})
         reply = strip_reasoning(
-            call_hermes(messages, model=self.model, num_predict=200, keep_alive="30m"))
+            call_hermes(messages, model=self.model, num_predict=120, keep_alive="30m"))
         self.history.append({"role": "user", "content": user_text})
         self.history.append({"role": "assistant", "content": reply})
         return reply

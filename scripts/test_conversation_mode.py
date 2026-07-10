@@ -13,6 +13,7 @@ Forces DRY_RUN=True so the #chat-bobby mirror posts are printed (that channel ma
 not exist yet); context reads from the real #ads channel. Needs Ollama + hermes3.
 """
 import os
+import re
 import sys
 
 try:
@@ -52,6 +53,26 @@ def preflight():
         print("[x] hermes3 not found. `ollama pull hermes3`.")
         return False
     return True
+
+
+def _starts_with_id(reply, name):
+    """True if `reply` opens with '<Name> here' (case-insensitive), ignoring
+    leading quotes/whitespace."""
+    return reply.lstrip(' "\'').lower().startswith(f"{name.lower()} here")
+
+
+def _strip_id_opener(text, name):
+    """Remove a leading '<Name> here[, sir].' identification line so the brevity
+    count measures CONTENT sentences, not the (asked-for) opener."""
+    return re.sub(rf"^\s*[\"']?{re.escape(name)} here(?:,?\s*sir)?[.!?]*\s*",
+                  "", text, flags=re.IGNORECASE)
+
+
+def _sentence_count(text):
+    """Approximate spoken-sentence count: terminators . ! ? that are NOT decimal
+    points (a digit on both sides, e.g. 2.03, doesn't end a sentence)."""
+    trimmed = re.sub(r"(?<=\d)\.(?=\d)", "", text)  # drop decimal points
+    return len(re.findall(r"[.!?]+", trimmed))
 
 
 class _FakeSession:
@@ -172,6 +193,29 @@ def main():
     r4 = chk("Bobby cites ROAS / real numbers (used the context)", mentions_roas)
     r5 = chk("exit phrase 'thanks' ended the session", exited)
 
+    # --- Improvements: identification opener + short spoken replies ------------
+    print("\n" + "=" * 64)
+    print("IDENTIFICATION OPENER + SHORT SPOKEN REPLIES")
+    print("=" * 64)
+    print(f"  Bobby reply 1 opens: {replies[0][:40]!r}")
+    print(f"  Bobby reply 2 opens: {replies[1][:40]!r}")
+    i1 = chk("Bobby's FIRST reply begins with 'Bobby here'", _starts_with_id(replies[0], "Bobby"))
+    i2 = chk("Bobby's SECOND reply does NOT re-identify",
+             not _starts_with_id(replies[1], "Bobby"))
+    counts = [_sentence_count(_strip_id_opener(r, "Bobby")) for r in replies]
+    print(f"  Bobby content-sentence counts (ID opener + decimals excluded): {counts}")
+    i3 = chk("all Bobby replies stay within 3 content sentences (<=3)", all(c <= 3 for c in counts))
+    i4 = chk("no bullet lists in replies",
+             not any(re.search(r"(?m)^\s*[-*•]\s", r) for r in replies))
+
+    # Sarah opener — a short second conversation (one turn is enough to check ID).
+    sarah = conversation.ConversationSession("sarah", None)
+    sarah.open()
+    sarah_first = sarah.agent_reply("What's the top support theme right now?")
+    sarah.close()
+    print(f"\n  Sarah reply 1 opens: {sarah_first[:40]!r}")
+    i5 = chk("Sarah's FIRST reply begins with 'Sarah here'", _starts_with_id(sarah_first, "Sarah"))
+
     # --- Fix 1 + Fix 2: mute config + silence-hallucination classification ----
     print("\n" + "=" * 64)
     print("UX FIXES — post-TTS mute + Whisper silence-hallucination rejection")
@@ -240,7 +284,8 @@ def main():
         want_not_spoken=[conversation.BACK_TO_STANDBY],
         want_replies=0)
 
-    all_ok = all([r1, r2, r3, r4, r5, f0, fa, fA, fb, fB, e1, e2, e3, e4, e5, e6,
+    all_ok = all([r1, r2, r3, r4, r5, i1, i2, i3, i4, i5,
+                  f0, fa, fA, fb, fB, e1, e2, e3, e4, e5, e6,
                   g1, g2, g3, g4, d1, d2, d3])
     print("\n" + ("ALL PASS — coherent conversation + tightened exit/silence filters "
                   "+ echo rejection + no silent exit."
