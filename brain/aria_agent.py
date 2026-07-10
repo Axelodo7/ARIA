@@ -68,6 +68,58 @@ def _truncate_sentences(text, n=2):
     return out + (" …" if len(sentences) > n else "")
 
 
+# Status reads relay from the channel where each teammate posts their WORK.
+_AGENT_STATUS_CHANNELS = {"sarah": "support_intel", "bobby": "ads",
+                          "ava": "content", "tom": "dev"}
+_AGENTS_ALT = r"(sarah|bobby|ava|tom)"
+
+# "What did Bobby find/do/say", "how's Ava", "any update from Tom", etc.
+_STATUS_RES = [
+    re.compile(rf"what did {_AGENTS_ALT}\b\s+(?:find|do|say)", re.IGNORECASE),
+    re.compile(rf"how'?s\s+{_AGENTS_ALT}\b", re.IGNORECASE),
+    re.compile(rf"how is\s+{_AGENTS_ALT}\b", re.IGNORECASE),
+    re.compile(rf"any update from\s+{_AGENTS_ALT}\b", re.IGNORECASE),
+    re.compile(rf"anything from\s+{_AGENTS_ALT}\b", re.IGNORECASE),
+    re.compile(rf"what(?:'?s| is)\s+{_AGENTS_ALT}\s+working on", re.IGNORECASE),
+]
+
+# "What's in #ads", "anything in #dev", "how's #content looking".
+_CHANNEL_RES = [
+    re.compile(r"what'?s in\s+#?([a-z][a-z0-9\-_]*)", re.IGNORECASE),
+    re.compile(r"anything in\s+#?([a-z][a-z0-9\-_]*)", re.IGNORECASE),
+    re.compile(r"how'?s\s+#?([a-z][a-z0-9\-_]*)\s+looking", re.IGNORECASE),
+]
+
+
+def _parse_status_query(text):
+    """Return the agent name for an explicit 'what did X find'-style query."""
+    for rx in _STATUS_RES:
+        m = rx.search(text or "")
+        if m:
+            return m.group(1).lower()
+    return None
+
+
+def _parse_channel_query(text):
+    """Return a channel key for a 'what's in #X'-style query, else None."""
+    for rx in _CHANNEL_RES:
+        m = rx.search(text or "")
+        if m:
+            key = m.group(1).lstrip("#").replace("-", "_").lower()
+            if key in config.CHANNEL_IDS:
+                return key
+    return None
+
+
+def _truncate_status(text, max_chars=300):
+    """Collapse whitespace and keep a short spoken excerpt. Slightly longer than
+    2 sentences because agents (e.g. Bobby) put the key ids after their summary."""
+    flat = " ".join((text or "").split())
+    if len(flat) <= max_chars:
+        return flat
+    return flat[:max_chars].rsplit(" ", 1)[0] + " …"
+
+
 def _approval_tldr(text):
     """A short label for an approval request, e.g. 'scale cr_A' from its id."""
     m = re.search(r"\[`([^`]+)`\]", text)
@@ -179,6 +231,25 @@ class Aria:
                                     "arguments": {"agent_name": agent.capitalize(), "task": task}}],
                     "dispatched": True}
 
+        # Deterministic status query ("what did Bobby find") — read that agent's
+        # channel directly, no model call, so it can never fabricate.
+        agent = _parse_status_query(user_text)
+        if agent:
+            ch = _AGENT_STATUS_CHANNELS[agent]
+            return {"reply": self._status_read(agent), "dispatched": False,
+                    "tool_calls": [{"name": "read_channel",
+                                    "arguments": {"channel_name": ch, "limit": 5}}]}
+
+        # Deterministic channel-direct query ("what's in #ads"). Approvals routes
+        # to the pending-approvals relay; other channels relay their last message.
+        ckey = _parse_channel_query(user_text)
+        if ckey:
+            if ckey == "approvals":
+                return {"reply": self._check_pending_approvals({}), "dispatched": False,
+                        "tool_calls": [{"name": "check_pending_approvals", "arguments": {}}]}
+            return {"reply": self._read_channel({"channel_name": ckey}), "dispatched": False,
+                    "tool_calls": [{"name": "read_channel", "arguments": {"channel_name": ckey}}]}
+
         model = self.reasoning_model if reasoning else self.model
         # Fix #2 — hard brevity cap on the fast path; keep the model warm.
         num_predict = None if reasoning else 64
@@ -245,6 +316,22 @@ class Aria:
             except Exception:
                 pass
         threading.Thread(target=_run, daemon=True).start()
+
+    def _status_read(self, agent):
+        """Relay the most recent message AUTHORED BY that agent from their work
+        channel. Deterministic — no model, so it can't fabricate."""
+        name = agent.capitalize()
+        cid = config.CHANNEL_IDS.get(_AGENT_STATUS_CHANNELS[agent])
+        if not cid:
+            return f"I can't reach {name}'s channel right now."
+        for m in slack_bus.history(cid, limit=5):
+            if m.get("username") != name:
+                continue  # skip joins, mentions, other authors — only this agent
+            text = (m.get("text") or "").strip()
+            if not text:
+                continue
+            return f"Most recent from {name}: {_truncate_status(text)}"
+        return f"Nothing recent from {name}."
 
     def _read_channel(self, args):
         """Relay the MOST RECENT message from a channel verbatim (2 sentences),

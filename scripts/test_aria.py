@@ -106,6 +106,23 @@ def main():
         if elapsed is not None:
             timings.append((label, elapsed))
 
+    # Case (f): "what did Bobby find today?" x3 — prove non-intermittency.
+    if not custom:
+        print("\n" + "#" * 68)
+        print("CASE (f): 'what did Bobby find today?' x3 (non-intermittency)")
+        print("#" * 68)
+        f_ok = True
+        for i in range(1, 4):
+            r = aria.think("what did Bobby find today?")
+            reply = r["reply"]
+            has_cr = any(x in reply for x in ("cr_A", "cr_B", "cr_D"))
+            no_fab = "sonic" not in reply.lower()
+            ok = has_cr and no_fab
+            f_ok = f_ok and ok
+            print(f"\n  run {i}: [{'PASS' if ok else 'FAIL'}]  mentions cr_={has_cr}  no-fabrication={no_fab}")
+            print(f"    reply: {reply[:180]}")
+        print(f"\n  (f) overall: {'PASS — all 3 deterministic + real' if f_ok else 'FAIL'}")
+
     print("\n" + "=" * 68)
     print("LATENCY SUMMARY (target <10s per turn)")
     print("=" * 68)
