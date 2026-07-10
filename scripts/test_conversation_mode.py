@@ -85,7 +85,7 @@ class _FakeSession:
     retry/echo/exit policy be tested deterministically."""
 
     def __init__(self):
-        self.agent, self.topic = "bobby", None
+        self.agent, self.name, self.topic = "bobby", "Bobby", None
         self.opened = self.closed = False
         self.replies = []
 
@@ -124,7 +124,8 @@ def _drive_case(chk, label, seq, want_reason=None, want_reason_contains=None,
     sess = _FakeSession()
     said = []
     reason = conversation.run_conversation(
-        sess, _scripted_capture(seq), said.append,
+        sess, _scripted_capture(seq),
+        lambda text, voice_id=None: said.append(text),
         opening_line="Connecting you to Bobby.")
     ok = bool(reason) and sess.opened and sess.closed  # never a silent/half exit
     if want_reason is not None:

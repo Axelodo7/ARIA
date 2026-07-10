@@ -30,8 +30,13 @@ def _client_or_none():
     return _client
 
 
-def speak(text):
-    """Stream `text` via ElevenLabs and play it. Returns True on success."""
+def speak(text, voice_id=None):
+    """Stream `text` via ElevenLabs and play it. Returns True on success.
+
+    voice_id selects the ElevenLabs voice; when None (or empty) it defaults to
+    ARIA's ELEVENLABS_VOICE_ID. Per-agent conversation replies pass the agent's
+    voice here so each teammate speaks in their own voice.
+    """
     if not text:
         return False
     client = _client_or_none()
@@ -42,10 +47,11 @@ def speak(text):
     from elevenlabs.core import ApiError
     import httpx
 
+    voice = voice_id or config.ELEVENLABS_VOICE_ID
     play_start, bytes_played = None, 0
     try:
         audio_iter = client.text_to_speech.stream(
-            config.ELEVENLABS_VOICE_ID, text=text, model_id=config.TTS_MODEL,
+            voice, text=text, model_id=config.TTS_MODEL,
             output_format=OUTPUT_FORMAT)
         with sd.RawOutputStream(samplerate=SAMPLE_RATE, channels=1, dtype="int16") as out:
             for chunk in audio_iter:

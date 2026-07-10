@@ -101,11 +101,11 @@ def main():
 
     mute_sec = config.POST_TTS_MUTE_MS / 1000.0
 
-    def speak_then_mute(text):
-        """Speak, then stay muted briefly so speaker bleed isn't captured as the
-        next turn (Fix 1)."""
+    def speak_then_mute(text, voice_id=None):
+        """Speak (in `voice_id`, or ARIA's default when None), then stay muted
+        briefly so speaker bleed isn't captured as the next turn (Fix 1)."""
         hud.set_state("speaking")
-        speak.speak(text)
+        speak.speak(text, voice_id)
         time.sleep(mute_sec)
 
     def capture_conversation_turn():

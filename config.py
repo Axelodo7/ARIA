@@ -125,6 +125,18 @@ PERSONAS = {
     "ARIA": ":large_blue_diamond:",
 }
 
+# --- Per-agent voices (Step 7B) ---------------------------------------------
+# name -> ElevenLabs Voice ID, so each teammate speaks in their OWN voice during
+# conversation mode. ARIA keeps ELEVENLABS_VOICE_ID for her own lines. Any entry
+# left unset (missing/empty env var) is None; speak() then falls back to ARIA's
+# voice with a logged warning rather than crashing.
+AGENT_VOICES = {
+    "Sarah": os.environ.get("SARAH_VOICE_ID"),
+    "Tom": os.environ.get("TOM_VOICE_ID"),
+    "Ava": os.environ.get("AVA_VOICE_ID"),
+    "Bobby": os.environ.get("BOBBY_VOICE_ID"),
+}
+
 # --- Per-agent model overrides ----------------------------------------------
 # One local model in memory by default (hermes3), but any persona can override.
 # Sarah runs on a reasoning model: hermes3 reliably miscounts clusters (it

@@ -155,12 +155,28 @@ BACK_TO_STANDBY = "Back to standby."
 MAX_CONSECUTIVE_SILENCE = 4
 
 
+def resolve_agent_voice(name, logger=None):
+    """Return the agent's ElevenLabs voice ID, or None (ARIA's default voice) if
+    it's unset — logging a warning in that case rather than crashing."""
+    voice = config.AGENT_VOICES.get(name)
+    if not voice:
+        msg = (f"[voice] no voice ID configured for {name} "
+               f"(set {name.upper()}_VOICE_ID in .env); using ARIA's voice.")
+        print(msg)
+        if logger:
+            logger.warning(msg)
+        return None
+    return voice
+
+
 def run_conversation(session, capture_turn, speak, logger=None,
                      opening_line=None, should_stop=None):
     """Drive one conversation session's turn loop. Audio-free and fully testable:
 
       capture_turn() -> (text, duration_sec)   one recorded+transcribed turn
-      speak(text)                              read a line aloud (blocking)
+      speak(text, voice_id=None)               read a line aloud (blocking); the
+                                               agent's replies pass the agent's
+                                               voice, ARIA's own lines pass None
       logger                                   optional logging.Logger
       opening_line                             spoken before the first capture
                                                (e.g. "Connecting you to Bobby.")
@@ -171,13 +187,15 @@ def run_conversation(session, capture_turn, speak, logger=None,
     exits silently — a silent exit was the original bug. Returns the reason string.
     """
     recent = deque(maxlen=3)   # ARIA's last few utterances, for echo rejection
+    # The agent's own voice (falls back to ARIA's, with a warning, if unset).
+    agent_voice = resolve_agent_voice(session.name, logger)
 
-    def say(text):
-        speak(text)
+    def say(text, voice_id=None):
+        speak(text, voice_id)
         recent.append(text)    # track so the same words heard back count as echo
 
     if opening_line:
-        say(opening_line)
+        say(opening_line)      # ARIA's line -> ARIA's voice
     session.open()
     if logger:
         logger.info("conversation opened with %s (topic=%s)", session.agent, session.topic)
@@ -213,7 +231,7 @@ def run_conversation(session, capture_turn, speak, logger=None,
             print(f"  {session.agent}: {reply}")
             if logger:
                 logger.info("%s: %s", session.agent, reply)
-            say(reply)
+            say(reply, agent_voice)   # agent's reply (incl. "Bobby here.") -> agent voice
         else:
             reason = "stop signal (shutdown)"
     except Exception as exc:  # never let the loop die silently
