@@ -32,13 +32,14 @@ import requests
 
 import config
 from brain.hermes_common import OLLAMA_URL
-from brain.aria_agent import Aria
+from brain.aria_agent import Aria, warmup
 
 CASES = [
     ("a) Direct answer (no tool)", "what time is it?"),
     ("b) Dispatch to Sarah", "ask Sarah how the feedback looks"),
     ("c) Status read (Bobby)", "what did Bobby find today?"),
     ("d) Approvals query", "what's in approvals?"),
+    ("e) Greeting (terseness)", "hey Aria"),
 ]
 
 
@@ -91,6 +92,9 @@ def main():
     print("\n--- Checking Ollama ---")
     if not preflight_ollama(Aria.model):
         return
+
+    print("  warming up the fast model...")
+    warmup()  # so the first real case isn't a cold start
 
     aria = Aria()  # no hud_hook — text-only
 

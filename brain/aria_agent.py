@@ -16,6 +16,7 @@ Tools:
 """
 import json
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -30,8 +31,67 @@ from integrations import slack_bus
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ARIA_PROMPT_PATH = Path(PROJECT_ROOT) / "aria_system_prompt.md"
 
-# ARIA addresses teammates by name; these map to their primary Slack channel.
-_AGENT_CHANNELS = {"sarah": "support_intel", "tom": "dev", "ava": "content", "bobby": "ads"}
+# Dispatch posts the task to the channel that teammate works from.
+_AGENT_CHANNELS = {"sarah": "feedback", "tom": "dev", "ava": "support_intel", "bobby": "ads"}
+
+# Tools whose output is STRUCTURED — ARIA speaks a Python-formatted version
+# verbatim rather than letting the fast model rephrase (and possibly fabricate).
+_STRUCTURED_RELAY = {"check_pending_approvals", "read_channel"}
+
+# Slack system events that are never real content (joins, topic changes, ...).
+# NOTE: bot_message is deliberately NOT here — those are the agents' own posts.
+_SYSTEM_SUBTYPES = {"channel_join", "channel_leave", "channel_topic",
+                    "channel_purpose", "channel_name", "channel_archive",
+                    "channel_unarchive"}
+
+# Explicit dispatch phrasing ("ask Sarah ...", "tell Bobby to ...", "have Ava
+# ...", "get Tom to ..."). Group 1 = agent, group 2 = the task text after it.
+# Handled deterministically in code — no model call at all.
+_DISPATCH_RE = re.compile(
+    r"\b(?:ask|tell|have|get)\s+(sarah|bobby|ava|tom)\b(?:\s+to\b)?[\s,:\-]*(.*)",
+    re.IGNORECASE | re.DOTALL)
+
+
+def _parse_dispatch(text):
+    """Return (agent, task) if the text is an explicit dispatch, else None."""
+    m = _DISPATCH_RE.search(text or "")
+    if not m:
+        return None
+    return m.group(1).lower(), m.group(2).strip()
+
+
+def _truncate_sentences(text, n=2):
+    """Collapse whitespace and keep at most the first n sentences."""
+    flat = " ".join((text or "").split())
+    sentences = re.split(r"(?<=[.!?])\s+", flat)
+    out = " ".join(sentences[:n]).strip()
+    return out + (" …" if len(sentences) > n else "")
+
+
+def _approval_tldr(text):
+    """A short label for an approval request, e.g. 'scale cr_A' from its id."""
+    m = re.search(r"\[`([^`]+)`\]", text)
+    if m:
+        bits = m.group(1).split("-")
+        core = bits[1:-1] if (len(bits) > 2 and bits[-1].isdigit()) else bits[1:]
+        if core:
+            return " ".join(core)
+    for line in text.splitlines():
+        s = line.strip()
+        if s.lower().startswith("tl;dr"):
+            return s.split(":", 1)[1].strip()[:50]
+    return "a proposal"
+
+
+def warmup(model=None):
+    """Fire a tiny prompt so the fast model is resident before the first real
+    call (avoids a cold-start on the user's first utterance)."""
+    try:
+        call_hermes([{"role": "user", "content": "ok"}],
+                    model=model or config.AGENT_MODELS["ARIA"],
+                    num_predict=1, keep_alive="30m")
+    except Exception:
+        pass
 
 
 def load_aria_prompt():
@@ -91,6 +151,9 @@ class Aria:
         # main.py injects hud.set_state here; text-only tests leave it None.
         self.hud_hook = hud_hook
         self.last_hud_state = None
+        # Whether dispatch actually fires the agent's --once cycle. True in
+        # production; tests can set False to post-without-fire for verification.
+        self.fire_cycles = True
         self.tool_handlers = {
             "dispatch_to_agent": self._dispatch_to_agent,
             "read_channel": self._read_channel,
@@ -102,11 +165,25 @@ class Aria:
     # --- The brain ----------------------------------------------------------
     def think(self, user_text, conversation_history=None, system_prompt=None,
               reasoning=False):
-        """Reason over the user's utterance. Returns
-        {reply, tool_calls, dispatched}. Runs on the fast model by default;
-        pass reasoning=True to route the whole turn through the slow model when
-        the request genuinely needs deeper thought."""
+        """Reason over the user's utterance. Returns {reply, tool_calls,
+        dispatched}. Fast model by default; pass reasoning=True to route the
+        whole turn through the slow model when depth is genuinely needed."""
+        # Fix #1 — explicit dispatch is deterministic: extract agent + task and
+        # dispatch directly, no model call at all. Instant and always correct.
+        parsed = _parse_dispatch(user_text)
+        if parsed:
+            agent, task = parsed
+            self._dispatch_to_agent({"agent_name": agent, "task": task})
+            return {"reply": f"Handed off to {agent.capitalize()}.",
+                    "tool_calls": [{"name": "dispatch_to_agent",
+                                    "arguments": {"agent_name": agent.capitalize(), "task": task}}],
+                    "dispatched": True}
+
         model = self.reasoning_model if reasoning else self.model
+        # Fix #2 — hard brevity cap on the fast path; keep the model warm.
+        num_predict = None if reasoning else 64
+        keep_alive = None if reasoning else "30m"
+
         prompt = (system_prompt or self.system_prompt) + tools_block(TOOLS)
         messages = [
             {"role": "system", "content": prompt},
@@ -116,7 +193,7 @@ class Aria:
         messages.append({"role": "user", "content": user_text})
 
         tool_calls, dispatched = [], False
-        reply = strip_reasoning(call_hermes(messages, model=model))
+        reply = strip_reasoning(call_hermes(messages, model=model, num_predict=num_predict, keep_alive=keep_alive))
         for _ in range(6):  # bounded tool-call loop
             call = parse_tool_call(reply)
             if not call:
@@ -129,10 +206,14 @@ class Aria:
                 reply = f"(skipped unknown tool {name})"
                 break
             result = self.tool_handlers[name](call.get("arguments", {}) or {})
+            # Fix #3 — structured tools speak their Python-formatted result
+            # verbatim; the model never rephrases it (no fabrication).
+            if name in _STRUCTURED_RELAY:
+                return {"reply": str(result), "tool_calls": tool_calls, "dispatched": dispatched}
             messages.append({"role": "assistant", "content": reply})
             messages.append({"role": "tool",
                              "content": json.dumps({"name": name, "content": str(result)})})
-            reply = strip_reasoning(call_hermes(messages, model=model))
+            reply = strip_reasoning(call_hermes(messages, model=model, num_predict=num_predict, keep_alive=keep_alive))
 
         return {"reply": reply, "tool_calls": tool_calls, "dispatched": dispatched}
 
@@ -150,9 +231,11 @@ class Aria:
                 f"their cycle is running in the background.")
 
     def _fire_cycle_async(self, agent):
-        """Fire the agent's --once cycle without blocking. Respects DRY_RUN."""
-        if config.DRY_RUN:
-            print(f"[DRY_RUN] would fire {agent}'s --once cycle in the background")
+        """Fire the agent's --once cycle without blocking. Skips when DRY_RUN or
+        fire_cycles is off (post-without-fire for verification)."""
+        if config.DRY_RUN or not self.fire_cycles:
+            print(f"[skip-fire] {agent}'s --once cycle not fired "
+                  f"(dry_run={config.DRY_RUN}, fire_cycles={self.fire_cycles})")
             return
 
         def _run():
@@ -164,29 +247,39 @@ class Aria:
         threading.Thread(target=_run, daemon=True).start()
 
     def _read_channel(self, args):
+        """Relay the MOST RECENT message from a channel verbatim (2 sentences),
+        so nothing is paraphrased or invented."""
         raw = str(args.get("channel_name") or args.get("channel") or "").strip()
         key = raw.lstrip("#").replace("-", "_").lower()
-        limit = int(args.get("limit", 10) or 10)
         cid = config.CHANNEL_IDS.get(key)
         if not cid:
-            return f"Unknown/unconfigured channel '{raw}'. Known: {sorted(config.CHANNEL_IDS)}"
-        texts = [t.strip() for t in slack_bus.read_channel(cid, limit=limit) if t and t.strip()]
-        return "\n".join(f"- {t}" for t in texts) if texts else "(no messages in that channel)"
+            return f"I don't have a channel called '{raw}'."
+        for m in slack_bus.history(cid, limit=10):  # newest first
+            text = (m.get("text") or "").strip()
+            if not text or m.get("subtype") in _SYSTEM_SUBTYPES:
+                continue  # skip empty / system (join/leave) messages
+            if re.fullmatch(r"(?:<@\w+>\s*)+", text):
+                continue  # skip bare @-mentions with no real content
+            agent = m.get("username") or "a teammate"
+            return f"The most recent from {agent}: {_truncate_sentences(text, 2)}"
+        return f"Nothing recent in #{raw.lstrip('#')}."
 
     def _check_pending_approvals(self, args):
+        """Return a Python-formatted spoken list of pending approvals — the model
+        never rephrases this, so it can't fabricate."""
         cid = config.CHANNEL_IDS.get("approvals")
         if not cid:
-            return "Approvals channel is not configured (CHANNEL_ID_APPROVALS)."
-        pending = []
+            return "Approvals isn't configured."
+        items = []
         for m in slack_bus.history(cid, limit=50):
             text = m.get("text") or ""
             if "APPROVAL NEEDED" not in text:
-                continue  # only real approval requests — skip joins/renames/mentions
+                continue  # only real requests — skip joins/renames/mentions
             if slack_bus.check_approval(cid, m.get("ts")) == "pending":
-                pending.append(text.splitlines()[0])
-        if not pending:
+                items.append(f"{m.get('username') or 'an agent'} — {_approval_tldr(text)}")
+        if not items:
             return "No pending approvals."
-        return "Pending approvals:\n" + "\n".join(f"- {p}" for p in pending)
+        return f"You have {len(items)} pending: " + "; ".join(items) + "."
 
     def _update_hud_state(self, args):
         state = str(args.get("state", "")).strip()

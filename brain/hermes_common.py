@@ -9,13 +9,19 @@ import requests, json, re
 OLLAMA_URL = "http://localhost:11434/api/chat"
 
 
-def call_hermes(messages, model=None, temperature=0.4):
+def call_hermes(messages, model=None, temperature=0.4, num_predict=None, keep_alive=None):
     # model is passed down per-agent (see config.AGENT_MODELS). Falls back to
     # hermes3 for backward compatibility when a caller doesn't specify one.
-    r = requests.post(OLLAMA_URL, json={
-        "model": model or "hermes3", "messages": messages, "stream": False,
-        "options": {"temperature": temperature}
-    })
+    # num_predict caps generated tokens (used for ARIA's terse fast replies);
+    # keep_alive keeps the model resident so cold starts don't recur.
+    options = {"temperature": temperature}
+    if num_predict is not None:
+        options["num_predict"] = num_predict
+    payload = {"model": model or "hermes3", "messages": messages,
+               "stream": False, "options": options}
+    if keep_alive is not None:
+        payload["keep_alive"] = keep_alive
+    r = requests.post(OLLAMA_URL, json=payload)
     return r.json()["message"]["content"]
 
 
