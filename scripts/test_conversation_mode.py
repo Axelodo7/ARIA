@@ -228,6 +228,32 @@ def main():
     print(f"\n  Sarah reply 1 opens: {sarah_first[:40]!r}")
     i5 = chk("Sarah's FIRST reply begins with 'Sarah here'", _starts_with_id(sarah_first, "Sarah"))
 
+    # --- Open-detection robustness (garbled transcription + dispatch priority) --
+    print("\n" + "=" * 64)
+    print("OPEN-DETECTION ROBUSTNESS")
+    print("=" * 64)
+    do = conversation.detect_open
+
+    def _opens(text, want_agent):
+        r = do(text)
+        ok = bool(r) and r[0] == want_agent
+        print(f"  detect_open({text!r}) -> {r}")
+        return chk(f"'{text}' opens conversation with {want_agent}", ok)
+
+    def _no_open(text):
+        r = do(text)
+        print(f"  detect_open({text!r}) -> {r}")
+        return chk(f"'{text}' does NOT open a conversation", r is None)
+
+    o1 = _opens("we talked to bobby about creative beat", "bobby")  # garbled transcription
+    o2 = _opens("talk to sarah", "sarah")
+    o3 = _no_open("ask bobby to pause cr_B")                        # dispatch, not conversation
+    o4 = _opens("I want to speak with tom", "tom")
+    o5 = _no_open("what did bobby find today")                     # status query, not conversation
+    # topic still extracted from the garbled phrasing
+    o6 = chk("garbled open still extracts topic ('creative beat')",
+             do("we talked to bobby about creative beat")[1] == "creative beat")
+
     # --- Fix 1 + Fix 2: mute config + silence-hallucination classification ----
     print("\n" + "=" * 64)
     print("UX FIXES — post-TTS mute + Whisper silence-hallucination rejection")
@@ -297,6 +323,7 @@ def main():
         want_replies=0)
 
     all_ok = all([r1, r2, r3, r4, r5, i1, i2, i3, i4, i5,
+                  o1, o2, o3, o4, o5, o6,
                   f0, fa, fA, fb, fB, e1, e2, e3, e4, e5, e6,
                   g1, g2, g3, g4, d1, d2, d3])
     print("\n" + ("ALL PASS — coherent conversation + tightened exit/silence filters "

@@ -25,15 +25,21 @@ _SYSTEM_SUBTYPES = {"channel_join", "channel_leave", "channel_topic",
                     "channel_purpose", "channel_name", "channel_archive", "channel_unarchive"}
 
 _AG = r"(sarah|bobby|ava|tom)"
-# Intent-open patterns (deterministic). Longer/more-specific first.
-_OPEN_RES = [
-    re.compile(rf"have a conversation with {_AG}\b", re.IGNORECASE),
-    re.compile(rf"i want to talk to {_AG}\b", re.IGNORECASE),
-    re.compile(rf"i want to chat with {_AG}\b", re.IGNORECASE),
-    re.compile(rf"let me talk to {_AG}\b", re.IGNORECASE),
-    re.compile(rf"\btalk to {_AG}\b", re.IGNORECASE),
-    re.compile(rf"chat with {_AG}\b", re.IGNORECASE),
-]
+
+# Conversation-open detection is signal-based, not phrase-based, so garbled live
+# transcription still triggers it. It fires on the CORE SIGNAL: an agent name +
+# ANY conversational-intent verb, regardless of exact wording or tense — so
+# "we talked to Bobby about X" (a mistranscription of "let me talk to Bobby")
+# still opens, not just the tidy canonical phrasings.
+_AGENT_RE = re.compile(rf"\b{_AG}\b", re.IGNORECASE)
+_CONV_INTENT_RE = re.compile(
+    r"\b(?:talk|talked|talking|chat|chatting|chatted|speak|speaking|spoke|"
+    r"conversation|connect|connecting)\b", re.IGNORECASE)
+# Priority rule: explicit COMMAND dispatch ("ask/tell/have/get <agent> ...")
+# must DISPATCH (fire-and-forget), never open a conversation — so we bail out of
+# detect_open on these and let aria.think handle the dispatch. This mirrors the
+# dispatch pattern in aria_agent._parse_dispatch so the two stay in lockstep.
+_DISPATCH_VERB_RE = re.compile(rf"\b(?:ask|tell|have|get)\s+{_AG}\b", re.IGNORECASE)
 
 def _normalize(text):
     """Lowercase, drop apostrophes, turn other punctuation into spaces, and
@@ -52,16 +58,27 @@ _EXIT_PHRASES = {_normalize(p) for p in (
 
 
 def detect_open(text):
-    """Return (agent, topic) if `text` opens a conversation, else None. `topic`
-    is whatever follows 'about ...', or None."""
-    for rx in _OPEN_RES:
-        m = rx.search(text or "")
-        if m:
-            agent = m.group(1).lower()
-            topic_m = re.search(r"\babout\s+(.+)$", text, re.IGNORECASE)
-            topic = topic_m.group(1).strip().rstrip(".?!") if topic_m else None
-            return agent, topic
-    return None
+    """Return (agent, topic) if `text` opens a conversation, else None.
+
+    Opens when the text names an agent AND carries a conversational-intent verb
+    (talk/talked/chat/speak/connect/... any tense) — robust to imperfect
+    transcription. Explicit command dispatch ("ask/tell/have/get <agent> ...")
+    takes priority and returns None so it dispatches instead. `topic` is whatever
+    follows 'about ...', else whatever follows the agent name, else None.
+    """
+    t = text or ""
+    if _DISPATCH_VERB_RE.search(t):
+        return None  # command dispatch wins — let aria.think fire-and-forget it
+    am = _AGENT_RE.search(t)
+    if not am or not _CONV_INTENT_RE.search(t):
+        return None
+    agent = am.group(1).lower()
+    topic_m = re.search(r"\babout\s+(.+)$", t, re.IGNORECASE)
+    if topic_m:
+        topic = topic_m.group(1).strip().rstrip(".?!")
+    else:
+        topic = t[am.end():].strip(" ,:-").rstrip(".?!").strip() or None
+    return agent, topic
 
 
 def is_exit(text):
