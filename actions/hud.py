@@ -20,12 +20,34 @@ _window = None
 _ready = threading.Event()
 
 
+def _primary_work_area():
+    """(x, y, w, h) of the primary display's work area — the full screen minus
+    the taskbar — on Windows. Returns None off Windows or on error."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+        rect = wintypes.RECT()
+        # SPI_GETWORKAREA (0x0030): screen area not covered by the taskbar.
+        if not ctypes.windll.user32.SystemParametersInfoW(0x0030, 0, ctypes.byref(rect), 0):
+            return None
+        return (rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top)
+    except Exception:
+        return None
+
+
 def create_window():
-    """Create the HUD window (call on the main thread). Returns the window."""
+    """Create the HUD window (call on the main thread). Sized to fill the primary
+    display's work area (maximized-borderless — taskbar stays visible, Alt+F4 to
+    close). Stays frameless, always-on-top, and transparent. Returns the window."""
     global _window
-    _window = webview.create_window(
-        "ARIA", url=INDEX_HTML,
-        frameless=True, on_top=True, transparent=True, width=720, height=800)
+    kwargs = dict(frameless=True, on_top=True, transparent=True)
+    area = _primary_work_area()
+    if area:
+        x, y, w, h = area
+        kwargs.update(x=x, y=y, width=w, height=h)
+    else:
+        kwargs.update(maximized=True)  # fallback (non-Windows / query failed)
+    _window = webview.create_window("ARIA", url=INDEX_HTML, **kwargs)
     return _window
 
 
