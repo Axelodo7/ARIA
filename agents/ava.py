@@ -115,6 +115,16 @@ def _build_plan_task(source_material, footage):
     )
 
 
+def _is_digest(message):
+    """True if a #support-intel message is a real Sarah digest worth turning
+    into content — i.e. authored by Sarah and not her empty 'no new patterns'
+    marker. Filters out channel joins, mentions, and other noise."""
+    if message.get("username") != "Sarah":
+        return False
+    text = (message.get("text") or "").strip()
+    return bool(text) and not text.lower().startswith("no new patterns")
+
+
 class Ava(BaseAgent):
     name = "Ava"
     icon = config.PERSONAS["Ava"]
@@ -124,22 +134,51 @@ class Ava(BaseAgent):
     # No model-callable tools: Ava proposes a plan; publishing is gated in code.
 
     def daily(self):
-        """Turn a #support-intel story into a content draft; post to #content and
-        file a scheduling approval. Returns a dict of everything for tests/logging."""
+        """Turn a NEW #support-intel digest into a content draft; post to
+        #content and file a scheduling approval. Returns a dict for tests/logging.
+
+        Only digests posted after the last successful cycle are processed (via
+        the bookmark), so Ava never re-digests old content. On the first-ever run
+        (no bookmark) she processes just the single most recent digest rather
+        than ingesting the whole channel history.
+        """
         si_id = config.CHANNEL_IDS.get("support_intel")
         if not si_id:
             raise RuntimeError(
-                "CHANNEL_ID_SUPPORT_INTEL is not set in .env — read_channel "
+                "CHANNEL_ID_SUPPORT_INTEL is not set in .env — reading Slack "
                 "needs a channel ID, not '#support-intel'."
             )
-        digests = slack_bus.read_channel(si_id, limit=10)
-        source = "\n\n".join(d for d in digests if d and d.strip()) or "(no recent digests)"
+
+        since = self.get_bookmark()
+        messages = slack_bus.history(si_id, limit=10)  # newest-first dicts
+        digests = [m for m in messages if _is_digest(m)]
+        if since is None:
+            new = digests[:1]  # first run: only the single most recent digest
+        else:
+            new = [m for m in digests if float(m.get("ts", "0")) > float(since)]
+
+        if not new:
+            msg = "No new digests since last cycle."
+            self.post(msg)
+            return {"status": "noop", "message": msg}
+
+        new.sort(key=lambda m: float(m.get("ts", "0")))  # oldest -> newest
+        source = "\n\n".join(m["text"] for m in new)
+        newest_ts = new[-1]["ts"]
         footage = gdrive.list_footage()
 
         plan = _first_json_object(strip_reasoning(self.run_turn(_build_plan_task(source, footage))))
         if not isinstance(plan, dict):
             raise RuntimeError("Ava did not return a parseable JSON plan.")
-        return self._process_plan(plan, source, footage)
+        result = self._process_plan(plan, source, footage)
+
+        # Advance the bookmark ONLY when content was generated AND the approval
+        # was filed (result not rejected). If the fabrication gate refused the
+        # plan — or anything raised — the bookmark is left unchanged so the next
+        # run retries the same digest instead of silently skipping it.
+        if not result.get("rejected"):
+            self.set_bookmark(newest_ts)
+        return result
 
     def _process_plan(self, plan, source, footage):
         """Validate a plan, then either post it (clean) or refuse it (fabrication).

@@ -8,11 +8,23 @@ that a human signs off by reacting with an emoji.
 All channel names and persona emoji come from config.py — nothing is hardcoded
 here. While config.DRY_RUN is True, write operations are logged instead of sent.
 """
+import sys
+
 from slack_sdk import WebClient
 
 import config
 
 client = WebClient(token=config.SLACK_BOT_TOKEN)
+
+
+def _safe_print(line):
+    """print() that never crashes on a non-encodable char (e.g. emoji/arrows on
+    a cp1252 Windows console). Diagnostic output only, so lossy is fine."""
+    try:
+        print(line)
+    except UnicodeEncodeError:
+        enc = (sys.stdout.encoding or "ascii")
+        print(line.encode(enc, "replace").decode(enc))
 
 
 def post_as(name, icon, channel, text):
@@ -24,7 +36,7 @@ def post_as(name, icon, channel, text):
     """
     icon = icon or config.PERSONAS.get(name, ":robot_face:")
     if config.DRY_RUN:
-        print(f"[DRY_RUN] post_as {name} {icon} -> {channel}: {text!r}")
+        _safe_print(f"[DRY_RUN] post_as {name} {icon} -> {channel}: {text!r}")
         return None
     resp = client.chat_postMessage(
         channel=channel, text=text, username=name, icon_emoji=icon
@@ -81,7 +93,7 @@ def request_approval(agent_name, description, payload_id):
         f"_React :white_check_mark: to approve, :x: to reject._"
     )
     if config.DRY_RUN:
-        print(f"[DRY_RUN] request_approval {agent_name} [{payload_id}]: {description!r}")
+        _safe_print(f"[DRY_RUN] request_approval {agent_name} [{payload_id}]: {description!r}")
         return None
     resp = client.chat_postMessage(
         channel=config.CHANNELS["approvals"],
