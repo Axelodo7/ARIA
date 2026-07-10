@@ -113,7 +113,12 @@ AGENT_MODELS = {
     # Bobby is numbers-and-reasoning (CPA/ROAS deltas, scale/cut calls) — the
     # workload where the reasoning model earns its slot, same as Sarah.
     "Bobby": "deepseek-r1:14b",
-    "ARIA": DEFAULT_MODEL,
+    # ARIA is split: her voice-loop responses (acks, dispatch confirmations,
+    # direct answers, reading approvals aloud) run on the FAST model for low
+    # latency; deeper work (summarizing long channels, ambiguous routing) uses
+    # ARIA_reasoning.
+    "ARIA": "hermes3",
+    "ARIA_reasoning": "deepseek-r1:14b",
 }
 
 # --- Budget guardrails ------------------------------------------------------
