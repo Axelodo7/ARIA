@@ -15,3 +15,8 @@ sounddevice
 # Step 6 — faster-whisper STT.
 faster-whisper
 numpy
+
+# Step 6 — VAD (silence-gated recording). webrtcvad-wheels is the drop-in
+# prebuilt-wheel build of `webrtcvad` (imports as `webrtcvad`) so no C compiler
+# is needed on Windows.
+webrtcvad-wheels
