@@ -1,21 +1,26 @@
-"""Ava — the content agent.
+"""Ava — the content agent (business-context driven, pre-launch).
 
-daily() reads Sarah's recent #support-intel digests for source material, asks
-the reasoning model to turn ONE story into a short-form video plan (3 hooks, a
-chosen hook with reasoning, the best-matching footage clip, a caption), validates
-the plan, renders via the Remotion stub, posts the draft to #content (showing
-rejected hooks for transparency), and files a scheduling approval to #approvals.
+ZentraIQ has no real user feedback yet, so Ava's daily() cycle generates
+promotional content from the business context (docs/user.md), NOT from
+#support-intel. Each cycle she rotates to the next CONTENT_PILLAR (contrarian
+claim -> the ZentraIQ Method -> pricing anchor -> build-in-public), so content
+doesn't repeat; the last-used pillar is tracked in shared state.
 
-Anti-fabrication is belt-AND-suspenders, like the money guardrails:
-  Level 1 (prompt): the model is told never to introduce a number/figure not
-    verbatim in the source digest, and that hashtags must be single tokens.
-  Level 2 (code): before anything posts, find_fabricated_claims() checks every
-    numeric claim in the chosen hook + caption against the source text. If any
-    number isn't in the source, the plan is REFUSED (nothing posts), and the
-    plan is quarantined to renders/rejected/ with the reason.
+Per cycle: write 3 brand-voice hooks, pick the strongest with reasoning, write a
+brand-aligned abstract image prompt, generate the background via Pollinations,
+render a branded story video (BrandedQuote, 1080x1920, handle shown), post the
+draft to #content, and file a publish approval to #approvals.
 
-Nothing is ever published here. Scheduling only happens through
-metricool.schedule_post, which is separately gated.
+Guardrails (all preserved):
+  Level 1 (prompt): brand voice + hard "never" rules + no invented specifics.
+  Level 2 (code): find_fabricated_claims() checks every numeric claim in the
+    chosen hook + caption against docs/user.md; ungrounded numbers -> the plan is
+    REFUSED (nothing posts) and quarantined to renders/rejected/.
+Graceful fallback: Pollinations fails -> skip the cycle (never post a bg-less
+  video); Remotion fails -> post the hook + caption as a text draft with a
+  render-failed note and still file the copy for approval.
+Nothing publishes without a ✅ — approval only marks a draft ready; Metricool
+  scheduling stays stubbed.
 """
 import json
 import os
@@ -24,11 +29,47 @@ import time
 
 import config
 from agents.base_agent import BaseAgent, load_agent_prompt, strip_reasoning
-from brain.hermes_common import _first_json_object
-from integrations import slack_bus, gdrive, remotion_runner
+from brain.hermes_common import _first_json_object, load_business_context
+from integrations import slack_bus, pollinations, remotion_runner
+from memory import store
 
 
-# --- Fabrication detection --------------------------------------------------
+# --- Content pillars (rotation) ---------------------------------------------
+# The four positioning angles Ava rotates through. The actual hooks are written
+# by the model FROM the business context (already in Ava's system prompt); these
+# briefs just steer which angle each cycle takes.
+CONTENT_PILLARS = [
+    {"name": "Contrarian claim",
+     "brief": "Challenge how traditional agencies work — 6-month timelines, "
+              "$50K-$200K quotes, scope creep — against ZentraIQ's 14-day, "
+              "fixed-price, AI-native model. Sharp, provocative, backed by the "
+              "real pricing/claims from the context."},
+    {"name": "The ZentraIQ Method",
+     "brief": "Break down HOW the 14-day AI-native build actually works — tight "
+              "scoping, building with the same AI tools (Cursor, Claude Code, "
+              "GPT) that are sold, ship-then-iterate. Make the process the story."},
+    {"name": "Pricing anchor",
+     "brief": "Tell the tier structure as a value story: Launch $8K, Scale $15K, "
+              "Flagship $23K, GalaxAI Builder $225/mo — anchored against the "
+              "$50K-$200K traditional agencies charge. Fixed price, no discounts."},
+    {"name": "Build-in-public",
+     "brief": "The solo founder + AI tools shipping fast narrative — behind the "
+              "scenes, code, deployments, the honesty of building in public. "
+              "Compelling because it's real and pre-launch."},
+]
+# Shared-state key holding the last-used pillar index (separate from any ts
+# bookmark). Ava no longer reads Slack for source material.
+_PILLAR_STATE_KEY = "Ava:pillar"
+
+# Appended to whatever image prompt the model writes, to guarantee the brand look
+# even if the model's prompt is weak. Dark, technical, cyan/pink, abstract.
+_BRAND_IMAGE_SUFFIX = (
+    "dark deep black background, cyan and magenta-pink glowing accents, minimal, "
+    "abstract, technical, high detail, cinematic, no text, no logos, no people"
+)
+
+
+# --- Fabrication detection (unchanged machinery, now grounded to user.md) ----
 _UNIT = (r"hours?|hrs?|minutes?|mins?|seconds?|secs?|days?|weeks?|months?|years?|"
          r"users?|customers?|clients?|people|percent|dollars?|times?|x")
 # A "numeric claim": a currency amount, a percentage, or a number followed by a
@@ -51,7 +92,7 @@ def find_fabricated_claims(text, source):
     """Return numeric claims in `text` whose number does NOT appear in `source`.
 
     An empty list means every number/figure in `text` is grounded in the source
-    digest. Non-empty means the model invented a specific that isn't there.
+    (docs/user.md). Non-empty means the model invented a specific that isn't there.
     """
     src_nums = _numbers_in(source)
     offenders = []
@@ -63,66 +104,47 @@ def find_fabricated_claims(text, source):
     return offenders
 
 
-def _fix_hashtag(tag):
-    """Force a hashtag to a single token: strip internal whitespace, ensure a
-    leading '#'."""
-    t = re.sub(r"\s+", "", str(tag))
-    if t and not t.startswith("#"):
-        t = "#" + t
-    return t
+def _brand_image_prompt(model_prompt):
+    """Augment the model's image prompt with the fixed brand-style suffix."""
+    base = (model_prompt or "").strip().rstrip(".")
+    if not base:
+        base = "abstract technical neural network"
+    return f"{base}, {_BRAND_IMAGE_SUFFIX}"
 
 
-def _build_plan_task(source_material, footage):
-    footage_lines = "\n".join(
-        f"- id={f['id']} | {f['filename']} | {f['duration_sec']}s | tags={f['tags']}"
-        for f in footage
-    )
-    allowed = sorted(config.METRICOOL_PLATFORM_ALLOWLIST)
+def _build_pillar_task(pillar):
     return (
-        "SOURCE MATERIAL — recent #support-intel digests from Sarah (URGENT / "
-        "BUGS / FEATURE REQUESTS / STORIES & PRAISE). Choose ONE story worth "
-        "turning into a short-form video:\n\n"
-        f"{source_material}\n\n"
-        "AVAILABLE FOOTAGE — choose the ONE clip whose tags best fit your story:\n"
-        f"{footage_lines}\n\n"
-        f"Allowed platforms (choose a subset): {allowed}\n\n"
+        f"Today's content pillar: {pillar['name']}.\n{pillar['brief']}\n\n"
+        "Create ONE short-form promotional video for ZentraIQ's social channels, "
+        "drawn ENTIRELY from the business context above — this is pre-launch "
+        "positioning, there is no user feedback to draw on.\n\n"
+        "Brand voice: direct, confident, slightly contrarian; short punchy "
+        "sentences; data over adjectives; NO exclamation marks, NO emoji, NO "
+        "hype. Sound like a smart engineer tired of agencies ripping founders off.\n\n"
         "Do your reasoning, then output ONLY a single JSON object — no markdown "
         "fences, no prose before or after — with EXACTLY these keys:\n"
         "{\n"
-        '  "story": "one sentence: the moment you are turning into content",\n'
         '  "hooks": ["hook 1", "hook 2", "hook 3"],\n'
         '  "chosen_hook_index": 0,\n'
-        '  "hook_reasoning": "why this hook wins",\n'
-        '  "footage_id": "an id from the list above",\n'
-        '  "footage_reasoning": "why this clip fits the story",\n'
-        '  "caption": "short first-person caption from the founder",\n'
-        '  "hashtags": ["#tag1", "#tag2"],\n'
-        f'  "platforms": {allowed}\n'
+        '  "hook_reasoning": "one or two sentences: why this hook is strongest",\n'
+        '  "image_prompt": "an ABSTRACT background prompt tied loosely to the '
+        'hook theme — dark, technical, minimal, deep black, cyan/pink accents; '
+        'NOT literal or stock-photo; no text, no logos, no people",\n'
+        '  "caption": "a short first-person caption from the founder"\n'
         "}\n\n"
-        "Rules: exactly 3 hooks, each specific and concrete (not 'we work hard "
-        "for you'); chosen_hook_index is 0, 1, or 2; footage_id MUST be one of "
-        "the ids listed; never fabricate user quotes, metrics, or testimonials — "
-        "use only what's in the source material, and anonymize users; platforms "
-        "must be a subset of the allowed list.\n"
-        "CRITICAL — no invented specifics: You must never introduce a number, "
-        "duration, statistic, timeframe, dollar figure, percentage, count, or "
-        "specific proper noun that is not verbatim in the source digest. If the "
-        "source says 'hours', write 'hours' — never a specific figure like "
-        "'3 hours'. If the source says 'multiple users', write 'multiple users' "
-        "— never '4 users'. When in doubt, quote the source's exact language. "
-        "Hashtags must be single tokens with no spaces (e.g. '#timeSaver' not "
-        "'#time saver')."
+        "Rules: exactly 3 hooks, each a single punchy line (~12 words max). "
+        "chosen_hook_index is 0, 1, or 2.\n"
+        "GROUNDING — every number, price, timeframe, or claim MUST come from the "
+        "business context: the $8K/$15K/$23K/$225 pricing, the 14-day build, and "
+        "'traditional agencies charge $50K-$200K' are allowed. NEVER invent user "
+        "counts, testimonials, revenue figures, growth stats, or timeframes that "
+        "aren't in the context.\n"
+        "HARD RULES — never: performance guarantees beyond the site's claims; "
+        "'$50K MRR' / '100K users' style promises; uptime or certification claims; "
+        "fabricated case studies or client names; the founder's age as a selling "
+        "point; a competitor's specific pricing; a promised calendar date (always "
+        "'14 days from kickoff'). No discounts — prices are fixed."
     )
-
-
-def _is_digest(message):
-    """True if a #support-intel message is a real Sarah digest worth turning
-    into content — i.e. authored by Sarah and not her empty 'no new patterns'
-    marker. Filters out channel joins, mentions, and other noise."""
-    if message.get("username") != "Sarah":
-        return False
-    text = (message.get("text") or "").strip()
-    return bool(text) and not text.lower().startswith("no new patterns")
 
 
 class Ava(BaseAgent):
@@ -133,60 +155,35 @@ class Ava(BaseAgent):
     system_prompt = load_agent_prompt("Ava")
     # No model-callable tools: Ava proposes a plan; publishing is gated in code.
 
+    # --- pillar rotation ----------------------------------------------------
+    def _next_pillar_index(self):
+        """The next pillar index, rotating through CONTENT_PILLARS."""
+        raw = store.get_bookmark(_PILLAR_STATE_KEY)
+        try:
+            last = int(raw)
+        except (TypeError, ValueError):
+            last = -1
+        return (last + 1) % len(CONTENT_PILLARS)
+
     def daily(self):
-        """Turn a NEW #support-intel digest into a content draft; post to
-        #content and file a scheduling approval. Returns a dict for tests/logging.
+        """Generate one branded promotional video from the next content pillar and
+        file it for approval. Returns a dict for tests/logging."""
+        pillar_idx = self._next_pillar_index()
+        pillar = CONTENT_PILLARS[pillar_idx]
+        # Advance the rotation pointer immediately so pillars rotate every cycle,
+        # regardless of whether Pollinations/Remotion later succeed.
+        store.set_bookmark(_PILLAR_STATE_KEY, str(pillar_idx))
+        print(f"[ava] pillar #{pillar_idx}: {pillar['name']}")
 
-        Only digests posted after the last successful cycle are processed (via
-        the bookmark), so Ava never re-digests old content. On the first-ever run
-        (no bookmark) she processes just the single most recent digest rather
-        than ingesting the whole channel history.
-        """
-        si_id = config.CHANNEL_IDS.get("support_intel")
-        if not si_id:
-            raise RuntimeError(
-                "CHANNEL_ID_SUPPORT_INTEL is not set in .env — reading Slack "
-                "needs a channel ID, not '#support-intel'."
-            )
-
-        since = self.get_bookmark()
-        messages = slack_bus.history(si_id, limit=10)  # newest-first dicts
-        digests = [m for m in messages if _is_digest(m)]
-        if since is None:
-            new = digests[:1]  # first run: only the single most recent digest
-        else:
-            new = [m for m in digests if float(m.get("ts", "0")) > float(since)]
-
-        if not new:
-            msg = "No new digests since last cycle."
-            self.post(msg)
-            return {"status": "noop", "message": msg}
-
-        new.sort(key=lambda m: float(m.get("ts", "0")))  # oldest -> newest
-        source = "\n\n".join(m["text"] for m in new)
-        newest_ts = new[-1]["ts"]
-        footage = gdrive.list_footage()
-
-        plan = _first_json_object(strip_reasoning(self.run_turn(_build_plan_task(source, footage))))
+        plan = _first_json_object(strip_reasoning(self.run_turn(_build_pillar_task(pillar))))
         if not isinstance(plan, dict):
             raise RuntimeError("Ava did not return a parseable JSON plan.")
-        result = self._process_plan(plan, source, footage)
+        return self._process_plan(plan, pillar)
 
-        # Advance the bookmark ONLY when content was generated AND the approval
-        # was filed (result not rejected). If the fabrication gate refused the
-        # plan — or anything raised — the bookmark is left unchanged so the next
-        # run retries the same digest instead of silently skipping it.
-        if not result.get("rejected"):
-            self.set_bookmark(newest_ts)
-        return result
-
-    def _process_plan(self, plan, source, footage):
-        """Validate a plan, then either post it (clean) or refuse it (fabrication).
-
-        Split out from daily() so the refuse path is testable with a hand-built
-        plan, without needing the model to actually misbehave.
-        """
-        # --- Normalize / validate the model's choices ------------------------
+    def _process_plan(self, plan, pillar):
+        """Validate a plan, run the fabrication gate, then generate + render +
+        post (with graceful fallbacks). Split out so the refuse/fallback paths
+        are testable with a hand-built plan."""
         hooks = [str(h) for h in (plan.get("hooks") or []) if str(h).strip()][:3]
         if not hooks:
             raise RuntimeError("Ava's plan contained no hooks.")
@@ -195,83 +192,64 @@ class Ava(BaseAgent):
             idx = 0
         chosen_hook = hooks[idx]
         rejected_hooks = [h for i, h in enumerate(hooks) if i != idx]
-
-        story = str(plan.get("story", "")).strip()
-        footage_id = plan.get("footage_id")
-        clip = gdrive.get_footage(footage_id) if footage_id else None
-        if clip is None:  # invalid id — fall back to tag/keyword match
-            clip = self._pick_footage_fallback(footage, f"{story} {chosen_hook}")
-            footage_id = clip["id"]
-        footage_reasoning = str(plan.get("footage_reasoning", "")).strip()
-
+        hook_reasoning = str(plan.get("hook_reasoning", "")).strip()
         caption = str(plan.get("caption", "")).strip()
-        hashtags = plan.get("hashtags") or []
-        if isinstance(hashtags, str):
-            hashtags = hashtags.split()
-        hashtags = [_fix_hashtag(t) for t in hashtags if str(t).strip()]
+        image_prompt = _brand_image_prompt(str(plan.get("image_prompt", "")))
 
-        proposed = [p for p in (plan.get("platforms") or []) if p in config.METRICOOL_PLATFORM_ALLOWLIST]
-        if not proposed:
-            proposed = sorted(config.METRICOOL_PLATFORM_ALLOWLIST)
+        base = {"pillar": pillar["name"], "hooks": hooks,
+                "chosen_hook_index": idx, "chosen_hook": chosen_hook,
+                "rejected_hooks": rejected_hooks, "hook_reasoning": hook_reasoning,
+                "caption": caption, "image_prompt": image_prompt}
 
-        # --- Level-2 fabrication gate (before any render/post) ---------------
+        # --- Level-2 fabrication gate (before any generation/post) -----------
+        source = load_business_context()
         offenders = find_fabricated_claims(f"{chosen_hook} {caption}", source)
         if offenders:
-            reason = (f"Fabricated specifics not in source digest: {offenders}. "
-                      f"Ava's prompt forbids inventing numbers/figures.")
+            reason = (f"Fabricated specifics not grounded in the business context: "
+                      f"{offenders}. Ava's prompt forbids inventing numbers/claims.")
             rejected_path = self._quarantine(plan, source, offenders, reason)
             print(f"[ava] REFUSED to post — {reason}")
             print(f"[ava] quarantined plan -> {rejected_path}")
-            return {
-                "rejected": True, "reason": reason, "offenders": offenders,
-                "rejected_path": rejected_path, "story": story,
-                "chosen_hook": chosen_hook, "caption": caption,
-                "hooks": hooks, "chosen_hook_index": idx,
-            }
+            return {**base, "rejected": True, "reason": reason,
+                    "offenders": offenders, "rejected_path": rejected_path}
 
-        # --- Clean: download + render (both stubbed) -------------------------
-        clip_path = os.path.join(config.RENDER_DIR, f"clip_{footage_id}.mp4")
-        gdrive.download_clip(footage_id, clip_path)
-        video_path = os.path.join(config.RENDER_DIR, f"ava_{int(time.time())}.mp4")
-        remotion_runner.render(
-            "CaptionedClip",
-            {"hook": chosen_hook, "caption": caption, "clip": clip_path},
-            video_path,
-        )
+        # --- Background via Pollinations; fail -> skip the cycle --------------
+        bg_path = pollinations.generate_image(image_prompt, width=1080, height=1920)
+        if not bg_path:
+            msg = "Pollinations background failed — skipping this cycle (no bg-less video)."
+            print(f"[ava] {msg}")
+            return {**base, "rejected": False, "skipped": True, "reason": msg,
+                    "background_path": None, "video_path": None}
 
-        # --- Post the draft + file the scheduling approval -------------------
+        # --- Render the branded story video; fail -> text draft + approval ----
+        out_dir = os.path.join(config.RENDER_DIR, "branded")
+        video_path = os.path.join(out_dir, f"ava_{int(time.time())}.mp4")
+        rendered = remotion_runner.render_branded_video(
+            hook_text=chosen_hook, background_path=bg_path, format="story",
+            output_path=video_path, show_handle=True)
+        render_failed = rendered is None
+
         content_post = self._format_content_post(
-            story, chosen_hook, plan.get("hook_reasoning", ""), rejected_hooks,
-            clip, footage_reasoning, caption, hashtags, video_path, proposed,
-        )
+            pillar, chosen_hook, hook_reasoning, rejected_hooks, image_prompt,
+            caption, rendered, render_failed)
         self.post(content_post)
 
-        payload_id = f"ava-post-{footage_id}-{int(time.time())}"
-        approval_desc = (
-            f"TL;DR: schedule new video to {proposed}.\n"
-            f"Story: {story}\nHook: \"{chosen_hook}\"\nCaption: {caption}\n"
-            f"Video: {video_path} (footage {clip['filename']}) [{payload_id}]"
-        )
+        payload_id = f"ava-post-{int(time.time())}"
+        if render_failed:
+            approval_desc = (
+                f"TL;DR: schedule copy ({pillar['name']}) — VIDEO RENDER FAILED, "
+                f"copy only.\nHook: \"{chosen_hook}\"\nCaption: {caption} [{payload_id}]")
+        else:
+            approval_desc = (
+                f"TL;DR: schedule branded story video ({pillar['name']}).\n"
+                f"Hook: \"{chosen_hook}\"\nCaption: {caption}\n"
+                f"Video: {rendered} [{payload_id}]")
         approval_ts = slack_bus.request_approval("Ava", approval_desc, payload_id)
 
-        return {
-            "rejected": False, "story": story, "hooks": hooks,
-            "chosen_hook_index": idx, "chosen_hook": chosen_hook,
-            "rejected_hooks": rejected_hooks,
-            "hook_reasoning": plan.get("hook_reasoning", ""),
-            "footage": clip, "footage_reasoning": footage_reasoning,
-            "caption": caption, "hashtags": hashtags, "platforms": proposed,
-            "video_path": video_path, "payload_id": payload_id,
-            "approval_ts": approval_ts, "content_post": content_post,
-        }
-
-    @staticmethod
-    def _pick_footage_fallback(footage, text):
-        words = set(re.findall(r"[a-z0-9]+", (text or "").lower()))
-        def score(f):
-            tag_words = set(re.findall(r"[a-z0-9]+", " ".join(f["tags"]).lower()))
-            return len(tag_words & words)
-        return max(footage, key=score)
+        return {**base, "rejected": False, "skipped": False,
+                "background_path": bg_path, "video_path": rendered,
+                "render_failed": render_failed, "payload_id": payload_id,
+                "approval_ts": approval_ts, "content_post": content_post}
 
     @staticmethod
     def _quarantine(plan, source, offenders, reason):
@@ -284,21 +262,21 @@ class Ava(BaseAgent):
                        "source": source, "plan": plan}, f, indent=2, ensure_ascii=False)
         return path
 
-    def _format_content_post(self, story, chosen_hook, hook_reasoning, rejected,
-                             clip, footage_reasoning, caption, hashtags,
-                             video_path, platforms):
+    def _format_content_post(self, pillar, chosen_hook, hook_reasoning, rejected,
+                             image_prompt, caption, video_path, render_failed):
         rejected_block = "\n".join(f"   • \"{h}\"" for h in rejected) or "   (none)"
-        tags = " ".join(hashtags)
+        if render_failed:
+            video_line = (":warning: *Render failed* — copy filed for approval as a "
+                          "text draft; video to follow.")
+        else:
+            video_line = f"*Rendered (story 1080x1920):* {video_path}"
         return (
-            f":clapper: *New content draft* — {story}\n\n"
+            f":clapper: *New content draft* — pillar: *{pillar['name']}*\n\n"
             f"*Hook (chosen):* \"{chosen_hook}\"\n"
             f"   ↳ why: {hook_reasoning}\n"
             f"*Rejected hooks:*\n{rejected_block}\n\n"
-            f"*Footage:* {clip['filename']} [{clip['id']}] — tags {clip['tags']}\n"
-            f"   ↳ why: {footage_reasoning}\n\n"
             f"*Caption:* {caption}\n"
-            f"*Hashtags:* {tags}\n"
-            f"*Rendered:* {video_path}\n"
-            f"*Proposed platforms:* {platforms}\n\n"
+            f"*Image prompt:* {image_prompt}\n"
+            f"{video_line}\n\n"
             f"_Filed for approval — see #approvals. Nothing publishes without a ✅._"
         )
