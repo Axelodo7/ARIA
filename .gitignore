@@ -12,6 +12,14 @@ renders/
 # --- Daemon logs ------------------------------------------------------------
 logs/
 
+# --- Remotion video project (Node) ------------------------------------------
+video/node_modules/
+video/out/
+video/.remotion/
+# transient render artifacts (copied backgrounds + props written per render)
+video/public/bg-*
+video/.render-props-*.json
+
 # --- Python -----------------------------------------------------------------
 __pycache__/
 *.py[cod]

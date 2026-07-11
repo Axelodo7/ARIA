@@ -1,0 +1,23 @@
+{
+  "name": "zentraiq-video",
+  "version": "1.0.0",
+  "private": true,
+  "description": "ZentraIQ branded video compositions (Remotion).",
+  "scripts": {
+    "studio": "remotion studio",
+    "render": "remotion render",
+    "upgrade": "remotion upgrade"
+  },
+  "dependencies": {
+    "@remotion/cli": "^4.0.487",
+    "@remotion/google-fonts": "^4.0.487",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7",
+    "remotion": "^4.0.487"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "typescript": "^5.9.3"
+  }
+}
