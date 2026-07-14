@@ -8,6 +8,11 @@ ZentraIQ (zentraiq.ai) is an AI-native MVP studio that builds AI-powered SaaS pr
 
 The founder is Ayyan. Address him as "sir" or "Ayyan" per each agent's own style.
 
+## The 14-day process
+- Discovery & scoping: 2 days
+- Build: 8 days
+- Ship & handoff: 4 days
+
 ## Offerings and pricing (fixed — never discount)
 
 - **Launch — $8K:** for first-time, often non-technical founders who have an AI idea and need a working MVP to validate demand. Includes 1 core AI feature.

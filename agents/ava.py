@@ -23,11 +23,14 @@ Nothing publishes without a ✅ — approval only marks a draft ready; Metricool
   scheduling stays stubbed.
 """
 import json
+import logging
 import os
 import re
 import time
 
 import config
+
+logger = logging.getLogger("aria.ava")
 from agents.base_agent import BaseAgent, load_agent_prompt, strip_reasoning
 from brain.hermes_common import _first_json_object, load_business_context
 from integrations import slack_bus, pollinations, remotion_runner
@@ -52,8 +55,10 @@ CONTENT_PILLARS = [
               "(built with the same Cursor / Claude Code / GPT we sell), tight "
               "honest scoping, the day-by-day process, ship-then-iterate. Make the "
               "PROCESS the story. Do NOT do a price or speed comparison and do NOT "
-              "mention agencies. Example angle: \"Discovery: 2 days. Build: 10. "
-              "Ship: 2. No scope creep, because we scope honestly.\""},
+              "mention agencies. Use the REAL breakdown from the context — 2 days "
+              "discovery, 8 days build, 4 days ship — never invent a different "
+              "split. Example angle: \"Discovery: 2 days. Build: 8 days. Ship: 4 "
+              "days. No scope creep, because we scope honestly.\""},
     {"name": "Pricing anchor",
      "brief": "Frame ONE tier as a value story by what you GET — the deliverables, "
               "the included AI feature, full code ownership. NO 'not $200K' / agency "
@@ -147,25 +152,82 @@ _CLAIM_RE = re.compile(
 )
 _NUM_RE = re.compile(r"\d[\d,]*(?:\.\d+)?")
 
+# Canonicalize unit words so "day"/"days" (etc.) compare equal. A numeric claim is
+# grounded only if the SAME number appears in the source with a COMPATIBLE unit /
+# currency / percent — not merely as a bare digit somewhere unrelated.
+_UNIT_CANON = {
+    "hour": "hour", "hours": "hour", "hr": "hour", "hrs": "hour",
+    "minute": "minute", "minutes": "minute", "min": "minute", "mins": "minute",
+    "second": "second", "seconds": "second", "sec": "second", "secs": "second",
+    "day": "day", "days": "day", "week": "week", "weeks": "week",
+    "month": "month", "months": "month", "year": "year", "years": "year",
+    "user": "user", "users": "user", "customer": "customer", "customers": "customer",
+    "client": "client", "clients": "client", "people": "people",
+    "percent": "percent", "dollar": "dollar", "dollars": "dollar",
+    "time": "time", "times": "time", "x": "x",
+}
+
 
 def _numbers_in(text):
     """Set of normalized number tokens present in text (commas stripped)."""
     return {m.group(0).replace(",", "") for m in _NUM_RE.finditer(text or "")}
 
 
-def find_fabricated_claims(text, source):
-    """Return numeric claims in `text` whose number does NOT appear in `source`.
+def _claim_signature(claim):
+    """A semantic signature for a numeric claim: currency / percent / (number,unit).
+    Two claims with the same signature mean the same thing; a shared bare digit in
+    different contexts does NOT. Returns None if there's no number."""
+    c = (claim or "").strip().lower()
+    num = _NUM_RE.search(c)
+    if not num:
+        return None
+    n = num.group(0).replace(",", "")
+    if c.startswith("$"):
+        return ("cur", n)
+    if "%" in c:
+        return ("pct", n)
+    unit_m = re.search(r"[a-z]+", c[num.end():])   # first word after the number
+    unit = _UNIT_CANON.get(unit_m.group(0), unit_m.group(0)) if unit_m else ""
+    return ("unit", unit, n)
 
-    An empty list means every number/figure in `text` is grounded in the source
-    (docs/user.md). Non-empty means the model invented a specific that isn't there.
+
+def _source_signatures(source):
+    """The set of semantic signatures for every numeric claim in the source."""
+    sigs = set()
+    for m in _CLAIM_RE.finditer(source or ""):
+        sig = _claim_signature(m.group(0))
+        if sig:
+            sigs.add(sig)
+    return sigs
+
+
+def find_fabricated_claims(text, source):
+    """Return numeric claims in `text` NOT grounded in `source` by a SEMANTICALLY
+    COMPATIBLE match — the same number with a compatible currency / percent / unit
+    context, not just the same digit appearing anywhere in the file.
+
+    An empty list means every figure is properly grounded. A claim whose digit
+    appears in the source ONLY in an unrelated context (e.g. "2 days" when the
+    source's only 2 is "<2s load") is treated as ungrounded AND logged as a
+    WARNING, so coincidental grounding is surfaced instead of silently allowed.
     """
+    src_sigs = _source_signatures(source)
     src_nums = _numbers_in(source)
     offenders = []
     for m in _CLAIM_RE.finditer(text or ""):
-        claim = m.group(0)
+        claim = m.group(0).strip()
+        sig = _claim_signature(claim)
+        if sig and sig in src_sigs:
+            continue  # grounded in a compatible context — pass
         num = _NUM_RE.search(claim)
-        if num and num.group(0).replace(",", "") not in src_nums:
-            offenders.append(claim.strip())
+        digit = num.group(0).replace(",", "") if num else None
+        if digit and digit in src_nums:
+            # The digit exists in the source but only in an incompatible context.
+            logger.warning(
+                "coincidental grounding rejected: %r — the number %s appears in "
+                "docs/user.md but NOT as '%s'; passing it would be a digit "
+                "coincidence, not a grounded fact.", claim, digit, claim)
+        offenders.append(claim)
     return offenders
 
 

@@ -13,6 +13,7 @@ it), DRY_RUN on (no Slack posts). Needs Ollama + gemma3.
 
     python scripts/test_content_pillars.py
 """
+import logging
 import os
 import re
 import sys
@@ -41,9 +42,10 @@ if os.path.exists(TMP_DB):
 store.DB_PATH = TMP_DB
 config.USE_POLLINATIONS = False   # cycle stops after choosing the hook; no HTTP/render
 
-from brain.hermes_common import OLLAMA_URL
+from brain.hermes_common import OLLAMA_URL, load_business_context
 from agents.ava import (Ava, CONTENT_PILLARS, _contains_filler,
-                        _contains_agency_markers, _BANNED_FILLER)
+                        _contains_agency_markers, _BANNED_FILLER,
+                        find_fabricated_claims)
 
 # Content-word overlap: two hooks that share most non-trivial words are the same
 # core message. Stopwords + the ever-present domain terms are dropped so the
@@ -91,10 +93,12 @@ def main():
 
     ava = Ava()
     results = []
+    full = []
     for n in range(len(CONTENT_PILLARS)):
         r = ava.daily()
+        full.append(r)
         results.append((r["pillar"], r["chosen_hook"]))
-        print(f"\n  cycle {n + 1}: [{r['pillar']}]")
+        print(f"\n  cycle {n + 1}: [{r['pillar']}]  rejected={bool(r.get('rejected'))}")
         print(f"    chosen hook: {r['chosen_hook']!r}")
 
     print("\n" + "=" * 72)
@@ -127,7 +131,39 @@ def main():
     g4 = chk("four genuinely different core messages (max pairwise overlap < 0.5)",
              worst[0] < 0.5)
 
-    all_ok = all([g1, g2, g3, g4])
+    # --- Fabrication-gate hardening: the Method 2/8/4 split, grounded for real ---
+    print("\n" + "=" * 72)
+    print("FABRICATION GATE (Method breakdown must be grounded, not a digit fluke)")
+    print("=" * 72)
+    ctx = load_business_context()
+    method = next((r for r in full if "method" in r["pillar"].lower()), None)
+    print(f"    Method hook: {method['chosen_hook']!r}")
+    # If it passed the gate, no numeric claim in its hook is ungrounded — so a day
+    # breakdown here can only be the real 2/8/4 (a wrong split would be rejected).
+    g5 = chk("Method cycle passed the fabrication gate (not rejected)",
+             not method.get("rejected"))
+    g6 = chk("real 2/8/4 breakdown is grounded in user.md (gate returns none)",
+             find_fabricated_claims("Discovery: 2 days. Build: 8 days. Ship: 4 days.", ctx) == [])
+    wrong = find_fabricated_claims("Discovery: 2 days. Build: 10 days. Ship: 2 days.", ctx)
+    g7 = chk("the OLD wrong split (build 10 days) is now REJECTED", "10 days" in " ".join(wrong))
+
+    # Coincidental bare-digit no longer passes, and it logs a WARNING.
+    records = []
+
+    class _Cap(logging.Handler):
+        def emit(self, rec):
+            records.append(rec.getMessage())
+
+    lg = logging.getLogger("aria.ava")
+    lg.addHandler(_Cap())
+    lg.setLevel(logging.WARNING)
+    coincidental = find_fabricated_claims("We fix it in 2 hours.", ctx)  # 2 is only <2s / 2 days
+    g8 = chk("coincidental bare-digit '2 hours' is rejected (not silently allowed)",
+             any("2 hour" in o.lower() for o in coincidental))
+    g9 = chk("a WARNING is logged when a number matches only by bare digit",
+             any("coincidental" in m.lower() for m in records))
+
+    all_ok = all([g1, g2, g3, g4, g5, g6, g7, g8, g9])
     print("\n" + ("ALL PASS — four distinct, on-pillar hooks; no filler; agency "
                   "comparison contained to Contrarian." if all_ok
                   else "SOME CHECKS FAILED."))
