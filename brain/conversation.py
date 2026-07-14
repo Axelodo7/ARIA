@@ -11,7 +11,7 @@ import re
 from collections import deque
 
 import config
-from brain.hermes_common import call_hermes, business_context_block
+from brain.hermes_common import call_hermes, business_context_block, cap_context
 from agents.base_agent import load_agent_prompt, strip_reasoning
 from integrations import slack_bus
 
@@ -368,8 +368,11 @@ class ConversationSession:
                     continue  # bare @-mentions
                 texts.append(t)
             if texts:
+                # Phase 2: cap the channel dump at ~2000 tokens (keeps newest,
+                # since texts are newest-first) so context can't fill the window.
+                activity = cap_context("\n\n".join(texts))
                 parts.append("Recent activity in your work channel (newest first):\n\n"
-                             + "\n\n".join(texts))
+                             + activity)
             if self.topic:
                 match = self._search_topic(self.topic)
                 if match:

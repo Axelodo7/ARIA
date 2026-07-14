@@ -138,29 +138,39 @@ AGENT_VOICES = {
 }
 
 # --- Per-agent model overrides ----------------------------------------------
-# One local model in memory by default (hermes3), but any persona can override.
-# Sarah runs on a reasoning model: hermes3 reliably miscounts clusters (it
-# enumerates feedback correctly but then re-estimates the totals), whereas a
-# reasoning model does that arithmetic internally. Slower per run, which is
-# fine at her every-2-hours cadence.
-DEFAULT_MODEL = "hermes3"
+# Phase 1 decision (measured): ONE model everywhere — gemma3. deepseek-r1:14b was
+# dropped: on a 4GB GPU it ran at ~2.5 tok/s (8.5-min cycles) because only ~23% of
+# the 9GB model offloaded to the GPU. gemma3 runs ~6x faster (~15.7 tok/s) and is
+# usable. Agents are now differentiated by PROMPT, not by model — which also
+# eliminates the ~28.5s model-swap tax that hit whenever the daemon alternated
+# between deepseek (cycles) and gemma3 (conversation). The reasoning-vs-fast split
+# is gone: gemma3 fills both roles.
+DEFAULT_MODEL = "gemma3"
 AGENT_MODELS = {
-    "Sarah": "deepseek-r1:14b",
-    # Tom fixes code — reasoning work, so the better model (the weakest link, so
-    # give it every advantage).
-    "Tom": "deepseek-r1:14b",
-    # Ava writes hooks and captions — creative-reasoning work, so the better model.
-    "Ava": "deepseek-r1:14b",
-    # Bobby is numbers-and-reasoning (CPA/ROAS deltas, scale/cut calls) — the
-    # workload where the reasoning model earns its slot, same as Sarah.
-    "Bobby": "deepseek-r1:14b",
-    # ARIA is split: her voice-loop responses (acks, dispatch confirmations,
-    # direct answers, reading approvals aloud) run on the FAST model for low
-    # latency; deeper work (summarizing long channels, ambiguous routing) uses
-    # ARIA_reasoning.
-    "ARIA": "hermes3",
-    "ARIA_reasoning": "deepseek-r1:14b",
+    "Sarah": "gemma3",
+    "Tom": "gemma3",
+    "Ava": "gemma3",
+    "Bobby": "gemma3",
+    # ARIA and ARIA_reasoning collapse onto the same model now; the key is kept so
+    # aria_agent's reasoning_model lookup still resolves without a code change.
+    "ARIA": "gemma3",
+    "ARIA_reasoning": "gemma3",
 }
+
+# --- Context window ---------------------------------------------------------
+# Phase 2: raise the context window from Ollama's 4096 default to 8192, passed in
+# options on every /api/chat call (more reliable than a separate Modelfile tag —
+# it applies unconditionally and needs no special model name). This kills the
+# latent Sarah truncation risk (her fixed prompt overhead is ~2900 tokens; at
+# 4096 she'd truncate around ~13 detailed feedback messages). If 8192 overflows
+# the 4GB GPU and ollama ps shows PROCESSOR falling to majority-CPU, step this
+# down to 6144.
+#
+# MEASURED on this 4GB GPU: at 8192, ollama ps showed 56%/44% CPU/GPU (majority
+# CPU) — the KV cache overflowed VRAM and spilled to CPU. Stepped down to 6144,
+# which keeps the model majority-GPU. 6144 still clears the Sarah truncation risk
+# (fixed overhead ~2900 + the ~2000-token context cap = ~4900, well under 6144).
+NUM_CTX = int(_get_float("NUM_CTX", 6144))
 
 # Conversation mode (Step 7A) uses a FAST LOCAL model for live back-and-forth
 # chat — NOT each agent's heavier scheduled-cycle model (deepseek-r1:14b stays).

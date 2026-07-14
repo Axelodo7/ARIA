@@ -7,7 +7,29 @@ routes through here.
 import requests, json, re
 from pathlib import Path
 
+import config
+
 OLLAMA_URL = "http://localhost:11434/api/chat"
+
+# Phase 2: cap any Slack channel / tool result that feeds a prompt so no single
+# prompt can approach the context window. ~2000 tokens ≈ ~8000 chars.
+CONTEXT_TOKEN_CAP = 2000
+_CHARS_PER_TOKEN = 4
+
+
+def cap_context(text, max_tokens=CONTEXT_TOKEN_CAP):
+    """Truncate `text` to ~max_tokens (keeping the HEAD — for newest-first channel
+    dumps that keeps the newest content). Cuts on a line boundary and appends a
+    marker. Callers whose content is oldest-first (e.g. Sarah's feedback) should
+    select by recency BEFORE joining rather than relying on this."""
+    if not text:
+        return text
+    max_chars = max_tokens * _CHARS_PER_TOKEN
+    if len(text) <= max_chars:
+        return text
+    head = text[:max_chars]
+    cut = head.rsplit("\n", 1)[0] if "\n" in head else head
+    return cut.rstrip() + "\n… [truncated to fit context window]"
 
 # Shared business context — read ONCE from docs/user.md and cached. Prepended to
 # every agent's + ARIA's system prompt so they all reason with the same knowledge
@@ -47,9 +69,9 @@ def business_context_block(path=BUSINESS_CONTEXT_PATH):
 
 
 def call_hermes(messages, model=None, temperature=0.4, num_predict=None,
-                keep_alive=None, think=None):
+                keep_alive=None, think=None, num_ctx=None):
     # model is passed down per-agent (see config.AGENT_MODELS). Falls back to
-    # hermes3 for backward compatibility when a caller doesn't specify one.
+    # config.DEFAULT_MODEL (gemma3) when a caller doesn't specify one.
     # num_predict caps generated tokens (used for ARIA's terse fast replies);
     # keep_alive keeps the model resident so cold starts don't recur.
     # think: set False to disable native reasoning on thinking models (e.g.
@@ -59,14 +81,41 @@ def call_hermes(messages, model=None, temperature=0.4, num_predict=None,
     options = {"temperature": temperature}
     if num_predict is not None:
         options["num_predict"] = num_predict
-    payload = {"model": model or "hermes3", "messages": messages,
+    # Phase 2: pin the context window on every call (defaults to config.NUM_CTX,
+    # currently 6144). Passed here so it applies to every persona and path uniformly.
+    options["num_ctx"] = num_ctx if num_ctx is not None else config.NUM_CTX
+    payload = {"model": model or config.DEFAULT_MODEL, "messages": messages,
                "stream": False, "options": options}
     if keep_alive is not None:
         payload["keep_alive"] = keep_alive
     if think is not None:
         payload["think"] = think
+
+    # --- PHASE 0 TEMPORARY INSTRUMENTATION (measure-only; remove after) -------
+    # Rough client-side token estimate (~4 chars/token) of everything we send.
+    _full_prompt_text = "\n".join(str(m.get("content", "")) for m in messages)
+    _approx_tokens = len(_full_prompt_text) // 4
+    print(f"[phase0] --> model={payload['model']} "
+          f"approx_prompt_tokens(len//4)={_approx_tokens} "
+          f"num_predict={num_predict} num_ctx={options['num_ctx']}", flush=True)
+    # -------------------------------------------------------------------------
+
     r = requests.post(OLLAMA_URL, json=payload)
-    return r.json()["message"]["content"]
+    data = r.json()
+
+    # --- PHASE 0 TEMPORARY INSTRUMENTATION (measure-only; remove after) -------
+    _pe = data.get("prompt_eval_count")
+    _ev = data.get("eval_count")
+    _ld = data.get("load_duration")
+    _ed = data.get("eval_duration")
+    _td = data.get("total_duration")
+    _tps = f"{_ev / (_ed / 1e9):.2f}" if (_ev and _ed) else "n/a"
+    print(f"[phase0] <-- prompt_eval_count(read)={_pe} eval_count={_ev} "
+          f"load_duration={_ld} eval_duration={_ed} total_duration={_td} "
+          f"tokens_per_sec={_tps}", flush=True)
+    # -------------------------------------------------------------------------
+
+    return data["message"]["content"]
 
 
 def _first_json_object(s, start=0):

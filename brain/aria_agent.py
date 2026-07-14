@@ -25,7 +25,7 @@ from pathlib import Path
 
 import config
 from brain.hermes_common import (call_hermes, parse_tool_call, tools_block,
-                                 business_context_block)
+                                 business_context_block, cap_context)
 from agents.base_agent import strip_reasoning
 from integrations import slack_bus
 
@@ -391,7 +391,10 @@ class Aria:
         key = target.lstrip("#").replace("-", "_").lower()
         cid = config.CHANNEL_IDS.get(key)
         if cid:
-            content = "\n".join(t for t in slack_bus.read_channel(cid, limit=30) if t.strip())
+            # Phase 2: cap the channel dump at ~2000 tokens (newest kept) so even
+            # a 30-message summarize can't push the prompt toward the window.
+            content = cap_context(
+                "\n".join(t for t in slack_bus.read_channel(cid, limit=30) if t.strip()))
             label = f"#{target.lstrip('#')}"
         else:
             content, label = target, "the provided text"
