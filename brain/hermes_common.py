@@ -5,6 +5,7 @@ teaches Hermes our tool-call format. Every persona (ARIA + the four agents)
 routes through here.
 """
 import requests, json, re
+from datetime import datetime, timezone
 from pathlib import Path
 
 import config
@@ -50,20 +51,77 @@ def load_business_context(path=BUSINESS_CONTEXT_PATH):
     return _business_context
 
 
-def business_context_block(path=BUSINESS_CONTEXT_PATH):
-    """The <business_context> preamble to prepend to a system prompt, or '' when
-    the file is missing/empty. Framed as shared knowledge to apply (not recite),
-    with an explicit note that the agent's own persona wins on any conflict."""
-    ctx = load_business_context(path)
-    if not ctx:
+# --- Business memory (Stage 2) ----------------------------------------------
+# docs/memory.md holds timestamped facts about ZentraIQ that change over time
+# (milestones, launched features, policy changes). Unlike user.md this is read
+# FRESH each call (never cached) because ARIA appends to it at runtime and the
+# agent daemon must see the latest. Loaded newest-first, hard-capped so it can't
+# erode the num_ctx-6144 headroom (agent memory already takes up to ~600 tokens).
+BUSINESS_MEMORY_PATH = Path(__file__).resolve().parent.parent / "docs" / "memory.md"
+BUSINESS_MEMORY_MAX_TOKENS = 400
+
+
+def load_business_memory(path=None, max_tokens=BUSINESS_MEMORY_MAX_TOKENS):
+    """Return the most recent docs/memory.md fact lines that fit within
+    max_tokens, NEWEST FIRST. Only bullet lines ('- ...') are facts; headers,
+    comments, and blanks are ignored. Missing/empty file -> ''. Read fresh."""
+    try:
+        text = Path(path or BUSINESS_MEMORY_PATH).read_text(encoding="utf-8")
+    except (FileNotFoundError, OSError):
         return ""
+    facts = [ln.rstrip() for ln in text.splitlines() if ln.strip().startswith("- ")]
+    if not facts:
+        return ""
+    max_chars = max_tokens * _CHARS_PER_TOKEN
+    kept, total = [], 0
+    for ln in reversed(facts):  # append order is chronological -> reverse = newest first
+        if kept and total + len(ln) + 1 > max_chars:
+            break
+        kept.append(ln)
+        total += len(ln) + 1
+    return "\n".join(kept)
+
+
+def append_business_fact(fact, path=None):
+    """Append one timestamped fact line to docs/memory.md and return the line
+    written (or None if `fact` is empty). PYTHON writes the date and formatting;
+    the caller supplies ONLY the fact text — never the timestamp or the file I/O."""
+    fact = (fact or "").strip()
+    if not fact:
+        return None
+    if fact[-1] not in ".!?":
+        fact += "."
+    date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    line = f"- {date}: {fact}"
+    p = Path(path or BUSINESS_MEMORY_PATH)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    existing = p.read_text(encoding="utf-8") if p.exists() else ""
+    prefix = "" if (not existing or existing.endswith("\n")) else "\n"
+    with open(p, "a", encoding="utf-8") as f:
+        f.write(prefix + line + "\n")
+    return line
+
+
+def business_context_block(path=BUSINESS_CONTEXT_PATH):
+    """The <business_context> preamble to prepend to a system prompt: docs/user.md
+    plus (Stage 2) the recent facts from docs/memory.md, capped and newest-first.
+    '' when both are empty. Framed as shared knowledge to apply (not recite), with
+    an explicit note that the agent's own persona wins on any conflict."""
+    ctx = load_business_context(path)
+    mem = load_business_memory()
+    if not ctx and not mem:
+        return ""
+    body = ctx
+    if mem:
+        body = ((body + "\n\n") if body else "") + (
+            "Recent developments you should know about (most recent first):\n" + mem)
     return (
         "<business_context>\n"
         "The following is shared knowledge about the business you work for. Apply "
         "it to your own role — do NOT recite it verbatim. It is background, not a "
         "script. If anything here ever conflicts with your persona or task "
         "instructions below, THOSE take precedence.\n\n"
-        f"{ctx}\n"
+        f"{body}\n"
         "</business_context>\n\n"
     )
 

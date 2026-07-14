@@ -25,7 +25,8 @@ from pathlib import Path
 
 import config
 from brain.hermes_common import (call_hermes, parse_tool_call, tools_block,
-                                 business_context_block, cap_context)
+                                 business_context_block, cap_context,
+                                 append_business_fact)
 from agents.base_agent import strip_reasoning
 from integrations import slack_bus
 
@@ -37,7 +38,25 @@ _AGENT_CHANNELS = {"sarah": "feedback", "tom": "dev", "ava": "support_intel", "b
 
 # Tools whose output is STRUCTURED — ARIA speaks a Python-formatted version
 # verbatim rather than letting the fast model rephrase (and possibly fabricate).
-_STRUCTURED_RELAY = {"check_pending_approvals", "read_channel"}
+_STRUCTURED_RELAY = {"check_pending_approvals", "read_channel", "remember"}
+
+# Explicit "remember this" phrasing -> save a business-memory fact deterministically
+# (Stage 2), no model call. Matches "remember [that] X", "note [that] X",
+# "make a note [that] X", tolerating a leading "hey jarvis" / "please".
+_REMEMBER_RE = re.compile(
+    r"^\s*(?:hey\s+jarvis[\s,]*)?(?:please\s+)?"
+    r"(?:remember|make a note|note)\b(?:\s+that)?[\s,:]+(.+)",
+    re.IGNORECASE | re.DOTALL)
+
+
+def _parse_remember(text):
+    """Return the fact text if `text` is an explicit remember/note command, else
+    None. The fact is everything after the trigger verb."""
+    m = _REMEMBER_RE.search(text or "")
+    if not m:
+        return None
+    fact = m.group(1).strip().strip("\"'").strip()
+    return fact or None
 
 # Slack system events that are never real content (joins, topic changes, ...).
 # NOTE: bot_message is deliberately NOT here — those are the agents' own posts.
@@ -201,6 +220,15 @@ TOOLS = [
     {"name": "check_pending_approvals",
      "description": "List items in #approvals still awaiting the user's decision (pending only).",
      "parameters": {"type": "object", "properties": {}}},
+    {"name": "remember",
+     "description": ("Save a durable fact about the business (ZentraIQ) that the "
+                     "whole team should know going forward — a milestone, a "
+                     "launched feature, a policy change. Use when the user tells "
+                     "you to remember or note something. Python timestamps and "
+                     "stores it; you provide only the fact text."),
+     "parameters": {"type": "object", "properties": {
+         "fact": {"type": "string", "description": "The fact to remember, one short sentence."}},
+         "required": ["fact"]}},
     {"name": "update_hud_state",
      "description": ("Set the on-screen HUD state: idle, listening, thinking, or "
                      "speaking. Silent side-effect — never mention it aloud."),
@@ -239,6 +267,7 @@ class Aria:
             "check_pending_approvals": self._check_pending_approvals,
             "update_hud_state": self._update_hud_state,
             "deep_summarize": self._deep_summarize,
+            "remember": self._remember,
         }
 
     # --- The brain ----------------------------------------------------------
@@ -247,6 +276,14 @@ class Aria:
         """Reason over the user's utterance. Returns {reply, tool_calls,
         dispatched}. Fast model by default; pass reasoning=True to route the
         whole turn through the slow model when depth is genuinely needed."""
+        # Stage 2 — explicit "remember/note that X" saves a business-memory fact
+        # deterministically (Python writes the timestamped line), no model call.
+        fact = _parse_remember(user_text)
+        if fact:
+            reply = self._remember({"fact": fact})
+            return {"reply": reply, "dispatched": False,
+                    "tool_calls": [{"name": "remember", "arguments": {"fact": fact}}]}
+
         # Fix #1 — explicit dispatch is deterministic: extract agent + task and
         # dispatch directly, no model call at all. Instant and always correct.
         parsed = _parse_dispatch(user_text)
@@ -402,6 +439,14 @@ class Aria:
         if not items:
             return "No pending approvals."
         return f"You have {len(items)} pending: " + "; ".join(items) + "."
+
+    def _remember(self, args):
+        """Save a business-memory fact to docs/memory.md. Python writes the
+        timestamp + formatting; the model (or deterministic parser) supplies only
+        the fact text. Confirmation is spoken verbatim (in _STRUCTURED_RELAY)."""
+        fact = str(args.get("fact") or args.get("text") or "").strip()
+        return "Noted, sir." if append_business_fact(fact) else \
+            "There was nothing to note, sir."
 
     def _update_hud_state(self, args):
         state = str(args.get("state", "")).strip()

@@ -28,7 +28,8 @@ from pathlib import Path
 
 import config
 from agents.base_agent import BaseAgent, load_agent_prompt, strip_reasoning
-from brain.hermes_common import CONTEXT_TOKEN_CAP, call_hermes, _first_json_object
+from brain.hermes_common import (CONTEXT_TOKEN_CAP, call_hermes, _first_json_object,
+                                 business_context_block)
 from integrations import slack_bus
 from memory import store
 
@@ -214,8 +215,11 @@ class Sarah(BaseAgent):
         """
         numbered = "\n".join(f"{i}. {m.get('text', '')}"
                              for i, m in enumerate(fresh, start=1))
+        # Business context + Stage 2 memory lead the classifier's system prompt so
+        # Sarah's cycle knows recent developments; the classify instructions follow
+        # and remain the operative task.
         raw = strip_reasoning(call_hermes(
-            [{"role": "system", "content": _CLASSIFY_SYSTEM},
+            [{"role": "system", "content": business_context_block() + _CLASSIFY_SYSTEM},
              {"role": "user", "content": f"Feedback messages:\n{numbered}"}],
             model=self.model, think=False))
         obj = _first_json_object(raw)
