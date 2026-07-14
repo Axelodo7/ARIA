@@ -10,11 +10,17 @@ done HERE in Python and is deterministic — the reasoning model is given the
 finished numbers and only writes the narrative "why". Money never depends on the
 model doing math, and execution is gated in integrations/ads_platform.py.
 """
+import re
 import time
 
 import config
 from agents.base_agent import BaseAgent, load_agent_prompt, strip_reasoning
 from integrations import slack_bus, ads_platform
+from memory import store
+
+# Parses an (action, creative_id) pair back out of a stored proposal summary,
+# e.g. "Proposed pause cr_B" -> ("pause", "cr_B").
+_PROPOSAL_SUMMARY_RE = re.compile(r"Proposed (scale|pause) (cr_\w+)", re.IGNORECASE)
 
 # Classification thresholds (percent change of last-7 vs prior-7 average).
 _WIN_ROAS = 10      # ROAS up >= this AND ...
@@ -135,16 +141,46 @@ class Bobby(BaseAgent):
         total_recent_spend = sum(a["recent_spend"] for a in analyses)
 
         report = strip_reasoning(self.run_turn(_build_report_task(analyses, total_recent_spend)))
+
+        # Principle 1: the "don't re-propose something recently rejected" rule is a
+        # right answer, so enforce it in CODE, not just the prompt. Suppress any
+        # proposal whose (action, creative) the human already rejected — until the
+        # data materially changes (a metric-aware check arrives with Stage 2). Note
+        # it in the report so the narrative stays coherent with what's filed.
+        rejected = self._recently_rejected()
+        suppressed = [a for a in analyses
+                      if a["action"] in ("scale", "pause")
+                      and (a["action"], a["creative_id"]) in rejected]
+        if suppressed:
+            note = "; ".join(f"{a['action']} {a['creative_id']}" for a in suppressed)
+            report += ("\n\n_Holding off on re-proposing " + note + " — previously "
+                       "rejected and the data hasn't materially changed._")
         self.post(report)
 
-        proposals = self._file_proposals(analyses)
+        proposals = self._file_proposals(analyses, rejected)
         return {"report": report, "proposals": proposals, "analyses": analyses}
 
-    def _file_proposals(self, analyses):
-        """File one approval request per money action, each with a distinct id."""
+    def _recently_rejected(self, limit=20):
+        """(action, creative_id) pairs this agent proposed and had REJECTED
+        recently, parsed deterministically from memory summaries."""
+        out = set()
+        for m in store.get_recent_memories(self.name, limit=limit):
+            if m.get("event_type") == "proposal_rejected":
+                mm = _PROPOSAL_SUMMARY_RE.match(m.get("summary") or "")
+                if mm:
+                    out.add((mm.group(1).lower(), mm.group(2)))
+        return out
+
+    def _file_proposals(self, analyses, rejected=None):
+        """File one approval request per money action, each with a distinct id.
+        Skips any (action, creative) in `rejected` — a proposal the human already
+        declined, not re-filed until the data materially changes."""
+        rejected = rejected or set()
         run_stamp = int(time.time())
         proposals = []
         for a in analyses:
+            if a["action"] in ("scale", "pause") and (a["action"], a["creative_id"]) in rejected:
+                continue  # recently rejected + data unchanged -> don't re-file
             if a["action"] == "scale":
                 payload_id = f"bobby-scale-{a['creative_id']}-{run_stamp}"
                 desc = (
@@ -169,6 +205,13 @@ class Bobby(BaseAgent):
                 continue  # flat -> hold, no proposal
 
             ts = slack_bus.request_approval("Bobby", desc, payload_id)
+            # Stage 1 memory: record the filed proposal with a deterministic
+            # (Python-written) summary, linked by payload_id for the verdict later.
+            if a["action"] == "scale":
+                summary = f"Proposed scale {a['creative_id']} +${a['delta']:.0f}/day"
+            else:
+                summary = f"Proposed pause {a['creative_id']}"
+            store.add_memory("Bobby", "proposal_filed", summary, payload_id)
             proposals.append({
                 "payload_id": payload_id, "action": a["action"],
                 "creative_id": a["creative_id"], "delta": a["delta"],

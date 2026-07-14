@@ -245,6 +245,10 @@ class Ava(BaseAgent):
                 f"Hook: \"{chosen_hook}\"\nCaption: {caption}\n"
                 f"Video: {rendered} [{payload_id}]")
         approval_ts = slack_bus.request_approval("Ava", approval_desc, payload_id)
+        # Stage 1 memory: record the filed publish proposal (Python-written summary).
+        store.add_memory("Ava", "proposal_filed",
+                         f"Proposed publish content ({pillar['name']})"
+                         + (" [render failed]" if render_failed else ""), payload_id)
 
         return {**base, "rejected": False, "skipped": False,
                 "background_path": bg_path, "video_path": rendered,

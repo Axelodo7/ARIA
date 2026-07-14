@@ -23,6 +23,7 @@ import config
 from agents.base_agent import BaseAgent, load_agent_prompt, strip_reasoning
 from brain.hermes_common import _first_json_object
 from integrations import slack_bus, git_repo
+from memory import store
 
 
 def _parse_tasks(md):
@@ -93,6 +94,7 @@ class Tom(BaseAgent):
         if branch in ("main", "master"):
             msg = f"Refusing to work on protected branch '{branch}'. Aborting."
             self.post(msg)
+            store.add_memory("Tom", "task_refused", f"Refused: protected branch '{branch}'")
             return {"status": "refused_branch", "branch": branch, "summary": msg}
 
         tasks = _parse_tasks(git_repo.read_file("TASKS.md"))
@@ -120,6 +122,8 @@ class Tom(BaseAgent):
             summary = (f":warning: *{task['id']}* — couldn't produce a valid edit. "
                        "Flagging for human review rather than guessing.")
             self.post(summary)
+            store.add_memory("Tom", "task_refused",
+                             f"Refused {task['id']}: couldn't produce a valid edit")
             return {"status": "no_edit", "task": task, "plan": plan, "summary": summary}
 
         # 6. Apply under scope caps (branch already guarded above).
@@ -127,6 +131,8 @@ class Tom(BaseAgent):
         if not applied["ok"]:
             summary = f":no_entry: *{task['id']}* — refusing to apply: {applied['reason']}"
             self.post(summary)
+            store.add_memory("Tom", "task_refused",
+                             f"Refused {task['id']}: {applied['reason']}"[:200])
             return {"status": "refused_scope", "task": task, "plan": plan,
                     "reason": applied["reason"], "summary": summary, "edits": edits}
 
@@ -153,6 +159,13 @@ class Tom(BaseAgent):
             f"so approving this is a no-op. [{payload_id}]"
         )
         approval_ts = slack_bus.request_approval("Tom", approval_desc, payload_id)
+        # Stage 1 memory: the attempt (with task id + verdict) and the filed merge
+        # proposal (linked by payload_id for the approve/reject outcome later).
+        store.add_memory("Tom", "task_attempted",
+                         f"Attempted {task['id']}: {task['title']} — target test "
+                         f"{'passed' if green else 'still failing'}"[:200])
+        store.add_memory("Tom", "proposal_filed",
+                         f"Proposed merge {task['id']} to main", payload_id)
 
         return {
             "status": "done", "task": task, "plan": plan, "diff": diff_text,

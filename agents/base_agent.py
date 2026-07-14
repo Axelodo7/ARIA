@@ -60,6 +60,58 @@ def strip_reasoning(text):
     return text.strip()
 
 
+# --- Agent memory read side (Stage 1) ---------------------------------------
+# The <your_recent_history> block is formatted DETERMINISTICALLY in Python from
+# stored memories and injected into each agent's cycle prompt. Hard-capped at
+# HISTORY_MAX_TOKENS so it can't eat the context window (num_ctx 6144, existing
+# prompt already sizeable) and reintroduce truncation.
+HISTORY_MAX_TOKENS = 600
+_CHARS_PER_TOKEN = 4
+
+_HISTORY_RULE = (
+    "Do not re-propose something that was recently rejected unless the underlying "
+    "data has materially changed. If you re-propose something previously rejected, "
+    "you must explicitly say why the situation is different now."
+)
+_HISTORY_OPEN = "<your_recent_history>\n"
+_HISTORY_HEADER = "Things you have already done recently:\n"
+_HISTORY_CLOSE = "\n" + _HISTORY_RULE + "\n</your_recent_history>\n\n"
+
+# event_type -> the verdict suffix shown after a proposal's summary line.
+_MEMORY_SUFFIX = {
+    "proposal_approved": " — APPROVED",
+    "proposal_rejected": " — REJECTED by Ayyan",
+    "proposal_filed": " — pending",
+}
+
+
+def _memory_line(m):
+    """One deterministic history line, e.g.
+    '- 2026-07-13: Proposed pause cr_B — REJECTED by Ayyan'."""
+    date = (m.get("timestamp") or "")[:10]           # YYYY-MM-DD
+    summary = m.get("summary") or ""
+    suffix = _MEMORY_SUFFIX.get(m.get("event_type"), "")
+    return f"- {date}: {summary}{suffix}"
+
+
+def format_recent_history(memories, max_tokens=HISTORY_MAX_TOKENS):
+    """Render newest-first `memories` into the <your_recent_history> block, capped
+    at ~max_tokens total (open tag + header + lines + rule + close). Truncates to
+    the most recent entries that fit. Empty memories -> '' (no block emitted)."""
+    if not memories:
+        return ""
+    budget = (max_tokens * _CHARS_PER_TOKEN
+              - len(_HISTORY_OPEN) - len(_HISTORY_HEADER) - len(_HISTORY_CLOSE))
+    lines, total = [], 0
+    for m in memories:  # newest first; keep the most recent that fit
+        line = _memory_line(m) + "\n"
+        if lines and total + len(line) > budget:
+            break
+        lines.append(line)
+        total += len(line)
+    return _HISTORY_OPEN + _HISTORY_HEADER + "".join(lines) + _HISTORY_CLOSE
+
+
 class BaseAgent:
     name = "agent"
     icon = ":robot_face:"
@@ -69,12 +121,18 @@ class BaseAgent:
     tools = []            # list of {"name", "description", "parameters"}
     tool_handlers = {}    # name -> callable(args) -> str
 
+    def _recent_history_block(self):
+        """The agent's own <your_recent_history> block (Stage 1 memory), or '' if
+        it has none. Read + formatted deterministically; never model-generated."""
+        return format_recent_history(store.get_recent_memories(self.name, limit=10))
+
     def run_turn(self, task_text, history=None):
-        # Order: shared business context first, then the agent's persona, then
-        # the tool-call format (only when the agent actually has tools — an empty
-        # <tools> block just invites confusion).
+        # Order: shared business context, then persona, then the agent's own
+        # recent-history memory, then the tool-call format (only when the agent
+        # actually has tools — an empty <tools> block just invites confusion).
         system = (business_context_block()
                   + self.system_prompt
+                  + self._recent_history_block()
                   + (tools_block(self.tools) if self.tools else ""))
         messages = [{"role": "system", "content": system}]
         messages += (history or [])
@@ -124,6 +182,10 @@ class BaseAgent:
             ts = m.get("ts")
             status = slack_bus.check_approval(approvals_id, ts)
             match = re.search(r"\[`?([^\]`]+)`?\]", m.get("text", ""))
-            results.append({"payload_id": match.group(1) if match else None,
-                            "ts": ts, "status": status})
+            payload_id = match.group(1) if match else None
+            # Stage 1 memory: on a ✅/❌ verdict, transition the stored proposal
+            # memory to approved/rejected so the agent remembers the outcome.
+            if payload_id and status in ("approved", "rejected"):
+                store.update_memory_by_payload(payload_id, f"proposal_{status}")
+            results.append({"payload_id": payload_id, "ts": ts, "status": status})
         return results

@@ -30,6 +30,7 @@ import config
 from agents.base_agent import BaseAgent, load_agent_prompt, strip_reasoning
 from brain.hermes_common import CONTEXT_TOKEN_CAP, call_hermes, _first_json_object
 from integrations import slack_bus
+from memory import store
 
 _CHARS_PER_TOKEN = 4
 _QUOTE_MAX_CHARS = 140
@@ -191,6 +192,11 @@ class Sarah(BaseAgent):
             digest = strip_reasoning(self.run_turn(task))
 
         self.post(digest)
+        # Stage 1 memory: record the digest with the (deterministic) cluster
+        # labels she reported, so she can see what she's already surfaced.
+        if clusters:
+            labels = ", ".join(f"{c['label']} ({c['count']})" for c in clusters)
+            store.add_memory("Sarah", "digest_posted", f"Posted digest: {labels}"[:240])
         # Advance the bookmark only after a successful cycle.
         self.set_bookmark(fresh[-1]["ts"])
         return digest
