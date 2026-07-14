@@ -35,28 +35,93 @@ from memory import store
 
 
 # --- Content pillars (rotation) ---------------------------------------------
-# The four positioning angles Ava rotates through. The actual hooks are written
-# by the model FROM the business context (already in Ava's system prompt); these
-# briefs just steer which angle each cycle takes.
+# The four positioning angles Ava rotates through. Each MUST produce content
+# distinct from the others — the briefs below are deliberately partitioned so the
+# same message can't be said twice (the failure that prompted this: the agency
+# price/speed comparison got reused across pillars). The agency comparison lives
+# ONLY in Contrarian; the others own different territory.
 CONTENT_PILLARS = [
     {"name": "Contrarian claim",
-     "brief": "Challenge how traditional agencies work — 6-month timelines, "
-              "$50K-$200K quotes, scope creep — against ZentraIQ's 14-day, "
-              "fixed-price, AI-native model. Sharp, provocative, backed by the "
-              "real pricing/claims from the context."},
+     "brief": "Challenge an industry ASSUMPTION and flip it. This is the ONE pillar "
+              "that owns the agency price/speed/timeline comparison — use it here "
+              "and NOWHERE else. Sharp and provocative, backed by real figures from "
+              "the context. Example angle: \"Agencies quote 6 months. We ship in "
+              "14 days.\""},
     {"name": "The ZentraIQ Method",
-     "brief": "Break down HOW the 14-day AI-native build actually works — tight "
-              "scoping, building with the same AI tools (Cursor, Claude Code, "
-              "GPT) that are sold, ship-then-iterate. Make the process the story."},
+     "brief": "Describe HOW the 14-day build actually works — the AI-native workflow "
+              "(built with the same Cursor / Claude Code / GPT we sell), tight "
+              "honest scoping, the day-by-day process, ship-then-iterate. Make the "
+              "PROCESS the story. Do NOT do a price or speed comparison and do NOT "
+              "mention agencies. Example angle: \"Discovery: 2 days. Build: 10. "
+              "Ship: 2. No scope creep, because we scope honestly.\""},
     {"name": "Pricing anchor",
-     "brief": "Tell the tier structure as a value story: Launch $8K, Scale $15K, "
-              "Flagship $23K, GalaxAI Builder $225/mo — anchored against the "
-              "$50K-$200K traditional agencies charge. Fixed price, no discounts."},
+     "brief": "Frame ONE tier as a value story by what you GET — the deliverables, "
+              "the included AI feature, full code ownership. NO 'not $200K' / agency "
+              "comparison; let the value stand on its own. Tiers (all fixed, no "
+              "discounts): Launch $8K, Scale $15K, Flagship $23K, GalaxAI Builder "
+              "$225/mo. Example angle: \"$8K. One core AI feature. Full code "
+              "ownership. Yours in 14 days.\""},
     {"name": "Build-in-public",
-     "brief": "The solo founder + AI tools shipping fast narrative — behind the "
-              "scenes, code, deployments, the honesty of building in public. "
-              "Compelling because it's real and pre-launch."},
+     "brief": "The solo-founder-plus-AI-tools angle: the process itself as content, "
+              "shipping in the open, behind-the-scenes, the honesty of building "
+              "pre-launch. Not a comparison, not a price list — the story of how "
+              "it's being built. Example angle: \"One founder. AI tools. Production "
+              "SaaS in two weeks.\""},
 ]
+
+# --- Distinctness / brand-voice backstop (Principle 1) ----------------------
+# Deterministic checks on the CHOSEN hook — the prompt is the first line, this is
+# the wall. Filler phrases are banned outright; the agency-comparison angle is
+# reserved for the Contrarian pillar and rejected in any other.
+_BANNED_FILLER = ("cut through the noise", "unlock", "transform", "revolutionize")
+_AGENCY_MARKERS = ("agenc", "$200k", "200k", "6 month", "6-month", "six month")
+
+
+def _contains_filler(hook):
+    """Banned filler phrases present in `hook` (lowercased substring match)."""
+    h = (hook or "").lower()
+    return [p for p in _BANNED_FILLER if p in h]
+
+
+def _contains_agency_markers(hook):
+    """True if `hook` uses the agency price/speed/timeline comparison angle."""
+    h = (hook or "").lower()
+    return any(m in h for m in _AGENCY_MARKERS)
+
+
+def _distinctness_violations(hook, pillar_name):
+    """Reasons `hook` breaks the distinctness/brand rules, or [] if it's clean.
+    Filler is always banned; agency-comparison markers are banned unless this is
+    the Contrarian pillar (which owns that angle)."""
+    problems = [f"banned filler '{p}'" for p in _contains_filler(hook)]
+    if "contrarian" not in (pillar_name or "").lower() and _contains_agency_markers(hook):
+        problems.append("agency-comparison angle (reserved for the Contrarian pillar)")
+    return problems
+
+
+def _hooks_of(plan):
+    """The up-to-3 non-empty hook strings from a plan dict."""
+    return [str(h) for h in (plan.get("hooks") or []) if str(h).strip()][:3]
+
+
+def _chosen_index_of(plan, hooks):
+    """The plan's chosen index, clamped to a valid position (default 0)."""
+    idx = plan.get("chosen_hook_index", 0)
+    return idx if isinstance(idx, int) and 0 <= idx < len(hooks) else 0
+
+
+def _chosen_hook_of(plan):
+    hooks = _hooks_of(plan)
+    return hooks[_chosen_index_of(plan, hooks)] if hooks else ""
+
+
+def _pick_clean_hook(plans, pillar_name):
+    """First (plan, index) across `plans` whose hook has no violations, or None."""
+    for plan in plans:
+        for i, h in enumerate(_hooks_of(plan)):
+            if not _distinctness_violations(h, pillar_name):
+                return plan, i
+    return None
 # Shared-state key holding the last-used pillar index (separate from any ts
 # bookmark). Ava no longer reads Slack for source material.
 _PILLAR_STATE_KEY = "Ava:pillar"
@@ -112,7 +177,30 @@ def _brand_image_prompt(model_prompt):
     return f"{base}, {_BRAND_IMAGE_SUFFIX}"
 
 
-def _build_pillar_task(pillar):
+def _regen_directive(problems, pillar):
+    """A stronger appendix telling the model exactly what its previous chosen hook
+    got wrong, to steer the single regeneration attempt."""
+    d = ("\n\nYOUR PREVIOUS CHOSEN HOOK VIOLATED THE RULES: " + "; ".join(problems)
+         + ". Rewrite ALL THREE hooks from scratch. Use NONE of these filler "
+         "phrases: 'cut through the noise', 'unlock', 'transform', 'revolutionize'.")
+    if "contrarian" not in pillar["name"].lower():
+        d += (f" Because this is the '{pillar['name']}' pillar (NOT Contrarian), do "
+              "NOT mention agencies, $200K, or 6 months, and do NOT make a "
+              "price-vs-price or speed comparison.")
+    d += " Stay strictly on this pillar's angle: " + pillar["brief"]
+    return d
+
+
+def _build_pillar_task(pillar, extra=""):
+    not_contrarian = "contrarian" not in pillar["name"].lower()
+    agency_line = (
+        "This is NOT the Contrarian pillar: do NOT use any agency comparison or "
+        "price-vs-price / speed-vs-speed framing (no 'agencies', no '$200K', no "
+        "'6 months') — stay on THIS pillar's specific angle above.\n"
+        if not_contrarian else
+        "This IS the Contrarian pillar: the agency price/speed/timeline comparison "
+        "belongs here — use it.\n"
+    )
     return (
         f"Today's content pillar: {pillar['name']}.\n{pillar['brief']}\n\n"
         "Create ONE short-form promotional video for ZentraIQ's social channels, "
@@ -121,6 +209,13 @@ def _build_pillar_task(pillar):
         "Brand voice: direct, confident, slightly contrarian; short punchy "
         "sentences; data over adjectives; NO exclamation marks, NO emoji, NO "
         "hype. Sound like a smart engineer tired of agencies ripping founders off.\n\n"
+        "DISTINCTNESS — Each pillar produces content DISTINCT from the others. "
+        "The agency-comparison angle (agencies, $50K-$200K, 6-month timelines) "
+        "belongs ONLY to the Contrarian pillar — never reuse it in another pillar. "
+        "Never reuse the same core message across pillars. Avoid filler phrases "
+        "('cut through the noise', 'unlock', 'transform', 'revolutionize') — every "
+        "word earns its place.\n"
+        f"{agency_line}\n"
         "Do your reasoning, then output ONLY a single JSON object — no markdown "
         "fences, no prose before or after — with EXACTLY these keys:\n"
         "{\n"
@@ -144,6 +239,7 @@ def _build_pillar_task(pillar):
         "fabricated case studies or client names; the founder's age as a selling "
         "point; a competitor's specific pricing; a promised calendar date (always "
         "'14 days from kickoff'). No discounts — prices are fixed."
+        f"{extra}"
     )
 
 
@@ -175,10 +271,42 @@ class Ava(BaseAgent):
         store.set_bookmark(_PILLAR_STATE_KEY, str(pillar_idx))
         print(f"[ava] pillar #{pillar_idx}: {pillar['name']}")
 
-        plan = _first_json_object(strip_reasoning(self.run_turn(_build_pillar_task(pillar))))
+        plan = self._generate_valid_plan(pillar)
+        return self._process_plan(plan, pillar)
+
+    def _ask_for_plan(self, task):
+        """One model call -> parsed JSON plan. Raises if it isn't parseable."""
+        plan = _first_json_object(strip_reasoning(self.run_turn(task)))
         if not isinstance(plan, dict):
             raise RuntimeError("Ava did not return a parseable JSON plan.")
-        return self._process_plan(plan, pillar)
+        return plan
+
+    def _generate_valid_plan(self, pillar):
+        """Generate a plan whose CHOSEN hook passes the distinctness/brand backstop
+        (Principle 1 — don't trust the prompt alone). If the first chosen hook
+        violates, regenerate once with a stronger directive; if that still fails,
+        fall back to the best non-violating candidate hook across both attempts."""
+        plan = self._ask_for_plan(_build_pillar_task(pillar))
+        problems = _distinctness_violations(_chosen_hook_of(plan), pillar["name"])
+        if not problems:
+            return plan
+
+        print(f"[ava] chosen hook violated rules {problems}; regenerating once.")
+        plan2 = self._ask_for_plan(
+            _build_pillar_task(pillar, extra=_regen_directive(problems, pillar)))
+        if not _distinctness_violations(_chosen_hook_of(plan2), pillar["name"]):
+            return plan2
+
+        clean = _pick_clean_hook([plan2, plan], pillar["name"])
+        if clean is not None:
+            src_plan, idx = clean
+            fallback = dict(src_plan)
+            fallback["chosen_hook_index"] = idx
+            print(f"[ava] regen still violated; fell back to a clean candidate hook.")
+            return fallback
+
+        print("[ava] no clean candidate hook available; using the regenerated plan.")
+        return plan2
 
     def _process_plan(self, plan, pillar):
         """Validate a plan, run the fabrication gate, then generate + render +
