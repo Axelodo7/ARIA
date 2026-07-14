@@ -13,30 +13,80 @@ Everything below uses these two paths — adjust if yours differ:
 | | value |
 |---|---|
 | Project root | `C:\Users\Ayyan\Desktop\aria` |
-| Service name | `ARIADaemon` (must match `scripts/service_status.py`) |
+| Daemon service | `ARIADaemon` (must match `scripts/service_status.py`) |
+| Ollama service | `OllamaServe` (from step 0) |
 
 ---
 
-## 0. Prerequisite: Ollama must come up on its own too
+## 0. Install Ollama as a service (so it's up at boot)
 
-The daemon's brains are local Ollama models. The service will start **at boot,
-before you log in** — and Ollama, by default, only starts when *you* log in. The
-daemon handles this gracefully (it waits for Ollama with backoff instead of
-crashing — you'll see `Ollama not reachable ... waiting` lines in the log until
-it's up), but the agents stay idle until Ollama exists.
+The daemon's brains are local Ollama models, and the ARIA service starts **at
+boot, before you log in** — but Ollama, by default, only starts when *you* log
+in. The daemon tolerates this (it waits for Ollama with backoff instead of
+crashing — you'll see `Ollama not reachable ... waiting` in the log), yet the
+agents stay idle until Ollama exists. For genuinely headless operation, run
+Ollama as its own service too, and have the ARIA service depend on it.
 
-For true headless operation, make Ollama start at boot too. Simplest: install a
-second NSSM service for it —
+> This uses `nssm.exe`. If you haven't got it yet, do **step 1** first, then come
+> back here.
 
-```
+### 0a. Stop the Ollama desktop app from also serving
+
+The Ollama tray app serves on the same port (`11434`); if it launches at login it
+collides with the service. **Quit the tray app**, and in its settings turn **off
+"Start Ollama on login"**. The service replaces it as the single instance.
+
+### 0b. Install the OllamaServe service
+
+Run in an **Administrator** PowerShell. These are the real paths on this machine —
+verify `ollama.exe` with `(Get-Command ollama).Source` if unsure.
+
+```powershell
 nssm install OllamaServe "C:\Users\Ayyan\AppData\Local\Programs\Ollama\ollama.exe" serve
+nssm set OllamaServe AppDirectory "C:\Users\Ayyan"
 nssm set OllamaServe Start SERVICE_AUTO_START
+
+# CRITICAL: a service runs as LocalSystem, whose model folder is EMPTY. Point it
+# at the models you already pulled as your user — otherwise every cycle fails
+# with "model ... not found" even though `ollama list` works in your own shell.
+nssm set OllamaServe AppEnvironmentExtra "OLLAMA_MODELS=C:\Users\Ayyan\.ollama\models" "OLLAMA_HOST=127.0.0.1:11434"
+
+# capture + rotate output (Ollama keeps its own logs too; this is a safety net)
+nssm set OllamaServe AppStdout "C:\Users\Ayyan\Desktop\aria\logs\ollama.stdout.log"
+nssm set OllamaServe AppStderr "C:\Users\Ayyan\Desktop\aria\logs\ollama.stdout.log"
+nssm set OllamaServe AppRotateFiles 1
+nssm set OllamaServe AppRotateOnline 1
+nssm set OllamaServe AppRotateBytes 10485760
+
+# graceful stop (Ctrl+C) + auto-restart if it ever exits
+nssm set OllamaServe AppStopMethodConsole 15000
+nssm set OllamaServe AppExit Default Restart
+nssm set OllamaServe AppThrottle 10000
+nssm set OllamaServe Description "Ollama local model server for ARIA"
+
 nssm start OllamaServe
 ```
 
-(Adjust the `ollama.exe` path — find it with `(Get-Command ollama).Source`.) If
-you skip this, the ARIA daemon still runs; its agents just wait until you log in
-and Ollama starts.
+### 0c. Verify it's serving your models
+
+```powershell
+ollama list          # should list gemma3, deepseek-r1:14b, etc.
+```
+
+If the list is **empty**, `OLLAMA_MODELS` is pointing at the wrong place — fix the
+path in step 0b and `nssm restart OllamaServe`.
+
+> **Check the GPU still works under the service.** A LocalSystem service runs in
+> "session 0", where GPU access sometimes falls back to CPU. Trigger one model
+> load (`ollama run gemma3 "hi"`), then `ollama ps` — `PROCESSOR` should still
+> show a GPU share (as it does when you run Ollama normally). If it's CPU-only,
+> either run this service under **your user account** instead
+> (`nssm set OllamaServe ObjectName ".\Ayyan" "<password>"`, which needs the
+> "log on as a service" right), or keep Ollama as a login-start app and accept
+> that the ARIA daemon waits (gracefully) until you log in.
+
+If you skip section 0 entirely, the ARIA daemon still runs — its agents just wait
+(logging `Ollama not reachable`) until you log in and Ollama starts.
 
 ---
 
@@ -98,8 +148,24 @@ nssm set ARIADaemon AppThrottle 10000
 
 # a friendly description
 nssm set ARIADaemon Description "ARIA agent-team daemon (Sarah/Bobby/Ava/Tom)"
+
+# depend on the Ollama service from step 0: Windows starts OllamaServe first and
+# won't start ARIADaemon until it is running. (Skip this line if you did NOT
+# install OllamaServe — otherwise ARIADaemon would refuse to start.)
+nssm set ARIADaemon DependOnService OllamaServe
 ```
 
+**Belt and suspenders on ordering.** The dependency guarantees Windows launches
+`OllamaServe` *before* `ARIADaemon`. But "running" only means Ollama's process
+started — not that it has finished loading and is answering on `11434`. The
+daemon's built-in `wait_for_ollama` covers that last gap (it waits for a real
+response with backoff). So even if you skip the dependency, the daemon still
+tolerates a slow Ollama; the dependency just makes the ordering explicit and
+avoids a burst of `Ollama not reachable` lines at every boot.
+
+> `sc` equivalent (if you prefer): `sc config ARIADaemon depend= OllamaServe`
+> (the space after `depend=` is required, and it replaces the whole depend list).
+>
 > To open NSSM's GUI editor for the same settings instead:
 > `nssm edit ARIADaemon`.
 
@@ -126,6 +192,13 @@ sc query     ARIADaemon      # same, via Windows
 nssm stop      ARIADaemon
 nssm remove    ARIADaemon confirm
 ```
+
+`OllamaServe` is an independent service — the same verbs manage it
+(`nssm start|stop|restart|status OllamaServe`). Stopping `ARIADaemon` leaves
+Ollama running; if you stop `OllamaServe`, the daemon's next cycles log
+`Ollama not reachable` and wait until it's back. If you ever `nssm remove`
+`OllamaServe`, first clear the dependency so `ARIADaemon` can still start:
+`nssm reset ARIADaemon DependOnService` (or `sc config ARIADaemon depend= ""`).
 
 ---
 
@@ -176,6 +249,18 @@ Work down this list:
 6. **Service won't stop / hangs on stop** — the graceful window is ~25s; NSSM
    escalates to a kill after `AppStopMethodConsole` (30s). Because all writes are
    atomic, a killed cycle is safe and simply re-runs on its next schedule.
+7. **Cycles fail with `model ... not found` but `ollama list` works in your shell**
+   — the classic LocalSystem trap: the `OllamaServe` service is looking in the
+   empty system-profile model folder. Confirm `OLLAMA_MODELS` is set on the
+   service (`nssm get OllamaServe AppEnvironmentExtra`) and points at
+   `C:\Users\Ayyan\.ollama\models`, then `nssm restart OllamaServe`.
+8. **`ARIADaemon` refuses to start with a dependency error** — you set
+   `DependOnService OllamaServe` but `OllamaServe` isn't installed (or is
+   disabled). Either install it (step 0) or clear the dependency:
+   `nssm reset ARIADaemon DependOnService`.
+9. **Ollama runs but only on CPU under the service** — session-0 GPU limitation;
+   see the GPU note in step 0c (run `OllamaServe` under your user account, or keep
+   Ollama as a login-start app).
 
 Run `daemon.py` by hand once to sanity-check the environment before blaming the
 service: `python C:\Users\Ayyan\Desktop\aria\daemon.py` (Ctrl+C to stop).
