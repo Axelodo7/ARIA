@@ -269,6 +269,68 @@ def _strip_identification(text, name):
     return _id_opener_re(name).sub("", text or "", count=1).lstrip()
 
 
+# --- No-execution guard (conversation mode has NO tool access) ----------------
+# Agents in conversation mode can only discuss and advise — there is no path from
+# here to spending, scaling, pausing, publishing, or merging. This rule goes into
+# EVERY conversation system prompt so no agent claims to have acted.
+_NO_EXECUTION_RULE = (
+    "HARD RULE — YOU CANNOT ACT FROM THIS CONVERSATION. You have NO ability to "
+    "execute, apply, schedule, spend, publish, or merge anything here: this is a "
+    "spoken discussion with no tool access. You can ONLY discuss and advise. If "
+    "the user asks you to do something, say you'll file it as a proposal for "
+    "approval — NEVER claim you have done it or are doing it. Never say "
+    "'executing', 'applying', 'done', or 'updated', and never state a new system "
+    "state (a new budget, a new total, a published post) as fact. Real actions "
+    "happen only later, through the human approval flow — never through this chat.\n\n"
+)
+
+# Appended to force a rewrite if a first draft slips into execution language.
+_EXEC_REGEN_DIRECTIVE = (
+    "\n\nYOUR PREVIOUS DRAFT CLAIMED TO EXECUTE OR COMPLETE AN ACTION. That is "
+    "false — you cannot act from this conversation. Rewrite to ADVISE ONLY: "
+    "recommend the action and say you'll file it as a proposal for approval. Do "
+    "not use 'executing', 'applying', 'done', or 'updated', and do not state any "
+    "new budget/total/state as if it happened."
+)
+
+# Deterministic safe reply if even the regenerated draft still claims execution —
+# guarantees the spoken/mirrored reply never asserts an action was taken.
+_EXEC_SAFE_FALLBACK = (
+    "I can't action that from this conversation, sir — I can only advise. I'll "
+    "file it as a proposal to #approvals for your approval."
+)
+
+# Patterns that mark a reply CLAIMING it did or is doing an action (vs. advising
+# it). Tuned to catch claims, not discussion: "I recommend scaling cr_A" is fine;
+# "Executing scale" / "I've scaled it" / "now at $55/day" are not.
+_EXEC_PATTERNS = [
+    re.compile(r"\bexecut(?:ing|ed)\b", re.IGNORECASE),
+    re.compile(r"\bI(?:'m| am)\s+(?:executing|applying|scaling|pausing|"
+               r"publishing|merging|scheduling|spending|bumping|raising)\b",
+               re.IGNORECASE),
+    re.compile(r"\bI(?:'ve| have)\s+(?:scaled|applied|paused|published|merged|"
+               r"scheduled|spent|executed|updated|increased|set|changed|bumped|"
+               r"raised|done)\b", re.IGNORECASE),
+    re.compile(r"\bnow\s+(?:at|running at|sitting at|set to)\s+\$?\d", re.IGNORECASE),
+    re.compile(r"\b(?:total|budget|spend|daily spend)\b[^.]{0,25}\bnow\b[^.]{0,10}\$?\d",
+               re.IGNORECASE),
+    re.compile(r"\b(?:it'?s|that'?s|it is|that is|all)\s+(?:done|applied|updated|"
+               r"scheduled|published|live)\b", re.IGNORECASE),
+    re.compile(r"\bconsider it (?:done|scaled|applied|handled|paused)\b", re.IGNORECASE),
+]
+
+
+def contains_execution_language(text):
+    """True if a conversation reply claims to HAVE executed / BE executing an
+    action, or states a new system state as fact. Deterministic backstop to the
+    prompt rule — advisory language ('I'd scale', 'I'll file a proposal') is fine.
+
+    Curly apostrophes are normalized first: gemma3 routinely emits 'I've' with a
+    U+2019, which the straight-quote patterns would otherwise miss."""
+    t = (text or "").replace("’", "'")
+    return any(p.search(t) for p in _EXEC_PATTERNS)
+
+
 class ConversationSession:
     """One ephemeral chat session with an agent. History lives in RAM only."""
 
@@ -311,6 +373,7 @@ class ConversationSession:
             business_context_block()   # shared business knowledge first, then persona
             + self.persona
             + "\n\nYou are in a LIVE VOICE CONVERSATION with the user. "
+            + _NO_EXECUTION_RULE      # you can advise but NOT act from here
             + opener
             + "Your spoken replies must be 2-3 sentences MAXIMUM — never more than "
             "three sentences, and shorter is better. Do NOT open with filler like "
@@ -324,15 +387,26 @@ class ConversationSession:
             "something, say so briefly.\n\n"
             f"CONTEXT (loaded once at the start of this conversation):\n{self.context}"
         )
-        messages = [{"role": "system", "content": system}]
-        messages += self.history
-        messages.append({"role": "user", "content": user_text})
-        # think=False: conversation mode never wants native reasoning tokens —
-        # on thinking models (qwen3.5) they'd consume the whole budget and return
-        # empty content; on non-thinking models it's a harmless no-op.
-        reply = strip_reasoning(
-            call_hermes(messages, model=self.model, num_predict=100,
-                        keep_alive="30m", think=False))
+
+        def _generate(extra_system=""):
+            # think=False: conversation mode never wants native reasoning tokens —
+            # on thinking models they'd consume the whole budget and return empty
+            # content; on non-thinking models it's a harmless no-op.
+            messages = [{"role": "system", "content": system + extra_system}]
+            messages += self.history
+            messages.append({"role": "user", "content": user_text})
+            return strip_reasoning(
+                call_hermes(messages, model=self.model, num_predict=100,
+                            keep_alive="30m", think=False))
+
+        reply = _generate()
+        # Deterministic backstop to the no-execution rule: if the draft claims to
+        # have acted, regenerate ONCE with a stronger directive; if it STILL claims
+        # execution, fall back to a safe advisory so the reply never asserts an
+        # action was taken (conversation mode has no tool access — see Bug 1).
+        if contains_execution_language(reply):
+            regen = _generate(_EXEC_REGEN_DIRECTIVE)
+            reply = regen if not contains_execution_language(regen) else _EXEC_SAFE_FALLBACK
         # Enforce the identification rule DETERMINISTICALLY — the speed model is
         # swappable and sometimes small, so don't trust it to comply: exactly one
         # identification line, on the first turn only. Add it if the model forgot;

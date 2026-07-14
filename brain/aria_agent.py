@@ -112,6 +112,32 @@ def _parse_channel_query(text):
     return None
 
 
+# Short utterances that are legitimate (greetings, yes/no, ARIA's name) and must
+# NOT be treated as garble — they pass through to the model.
+_COMMON_SHORT = {"hi", "hey", "hello", "yo", "aria", "jarvis", "thanks", "thank",
+                 "yes", "no", "yeah", "yep", "nope", "ok", "okay", "hmm", "sup",
+                 "morning", "evening", "please", "stop", "wait", "hey aria"}
+
+
+def _looks_unintelligible(text):
+    """Heuristic: a very short fragment that matched no route is almost certainly
+    garbled transcription / noise. Return True to ask the user to repeat rather
+    than let the model free-associate a hallucinated answer (Bug 2). Conservative:
+    only the clearly-too-short cases, and recognizable greetings/common words are
+    let through. ARIA's system prompt handles longer-but-incoherent input by
+    instructing her to ask for clarification."""
+    t = (text or "").strip()
+    if not t:
+        return True
+    words = t.split()
+    if len(words) <= 2 and len(t) <= 12:
+        toks = [re.sub(r"[^\w]", "", w.lower()) for w in words]
+        toks = [tok for tok in toks if tok]
+        # Let it through only if EVERY token is a recognizable common word.
+        return not (toks and all(tok in _COMMON_SHORT for tok in toks))
+    return False
+
+
 def _truncate_status(text, max_chars=300):
     """Collapse whitespace and keep a short spoken excerpt. Slightly longer than
     2 sentences because agents (e.g. Bobby) put the key ids after their summary."""
@@ -250,6 +276,12 @@ class Aria:
                         "tool_calls": [{"name": "check_pending_approvals", "arguments": {}}]}
             return {"reply": self._read_channel({"channel_name": ckey}), "dispatched": False,
                     "tool_calls": [{"name": "read_channel", "arguments": {"channel_name": ckey}}]}
+
+        # Garbled / unintelligible very-short input that matched no route — ask the
+        # user to repeat rather than free-associating a hallucinated answer (Bug 2).
+        if _looks_unintelligible(user_text):
+            return {"reply": "I didn't catch that, sir. Could you say that again?",
+                    "tool_calls": [], "dispatched": False}
 
         model = self.reasoning_model if reasoning else self.model
         # Fix #2 — hard brevity cap on the fast path; keep the model warm.

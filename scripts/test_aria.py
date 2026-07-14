@@ -10,7 +10,7 @@ Run from the project root (add a quoted string to test one utterance):
 
 Runs with DRY_RUN forced on, so dispatch posts nothing and fires nothing for
 real (it logs what it would do); channel reads still hit real Slack (read-only).
-Requires Ollama running with ARIA's model (deepseek-r1:14b).
+Requires Ollama running with ARIA's model (gemma3).
 """
 import os
 import sys
@@ -122,6 +122,42 @@ def main():
             print(f"\n  run {i}: [{'PASS' if ok else 'FAIL'}]  mentions cr_={has_cr}  no-fabrication={no_fab}")
             print(f"    reply: {reply[:180]}")
         print(f"\n  (f) overall: {'PASS — all 3 deterministic + real' if f_ok else 'FAIL'}")
+
+    # --- Bug 2: capability boundary + garble clarification ---------------------
+    if not custom:
+        from brain.aria_agent import _looks_unintelligible
+        print("\n" + "#" * 68)
+        print("CAPABILITY BOUNDARY + GARBLE HANDLING")
+        print("#" * 68)
+
+        def chk(label, ok):
+            print(f"  [{'PASS' if ok else 'FAIL'}] {label}")
+            return ok
+
+        # (c) garbled input -> clarification, deterministic (no model call)
+        garble = "brr uh"
+        gr = aria.think(garble)
+        print(f"\n  (c) think({garble!r}) -> {gr['reply']!r}")
+        c_ok = (("catch" in gr["reply"].lower() or "say that again" in gr["reply"].lower())
+                and not gr["dispatched"] and not gr["tool_calls"])
+        c1 = chk("garbled input asks for clarification (no free-association)", c_ok)
+        c2 = chk("_looks_unintelligible('brr uh') is True", _looks_unintelligible("brr uh"))
+        c3 = chk("_looks_unintelligible('what did Bobby find today') is False",
+                 not _looks_unintelligible("what did Bobby find today"))
+
+        # (b) calendar query -> says no access, invents nothing (behavioral)
+        cal = aria.think("what's on my calendar?")
+        rl = cal["reply"].lower().replace("’", "'")  # normalize gemma3's curly apostrophes
+        print(f"  (b) think('what's on my calendar?') -> {cal['reply']!r}")
+        no_access = any(p in rl for p in ("don't have", "do not have", "no access",
+                        "not connected", "can't access", "cannot access", "don't have access",
+                        "no calendar"))
+        invented = any(w in rl for w in ("3pm", "3 pm", "double-book", "design review",
+                       "you have a meeting", "you're booked", "at 3"))
+        c4 = chk("calendar query: mentions calendar and says no access", "calendar" in rl and no_access)
+        c5 = chk("calendar query: invents no meetings/events", not invented)
+
+        print(f"\n  Bug-2 section: {'PASS' if all([c1, c2, c3, c4, c5]) else 'SOME FAILED'}")
 
     print("\n" + "=" * 68)
     print("LATENCY SUMMARY (target <10s per turn)")
