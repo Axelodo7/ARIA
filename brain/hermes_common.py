@@ -90,32 +90,8 @@ def call_hermes(messages, model=None, temperature=0.4, num_predict=None,
         payload["keep_alive"] = keep_alive
     if think is not None:
         payload["think"] = think
-
-    # --- PHASE 0 TEMPORARY INSTRUMENTATION (measure-only; remove after) -------
-    # Rough client-side token estimate (~4 chars/token) of everything we send.
-    _full_prompt_text = "\n".join(str(m.get("content", "")) for m in messages)
-    _approx_tokens = len(_full_prompt_text) // 4
-    print(f"[phase0] --> model={payload['model']} "
-          f"approx_prompt_tokens(len//4)={_approx_tokens} "
-          f"num_predict={num_predict} num_ctx={options['num_ctx']}", flush=True)
-    # -------------------------------------------------------------------------
-
     r = requests.post(OLLAMA_URL, json=payload)
-    data = r.json()
-
-    # --- PHASE 0 TEMPORARY INSTRUMENTATION (measure-only; remove after) -------
-    _pe = data.get("prompt_eval_count")
-    _ev = data.get("eval_count")
-    _ld = data.get("load_duration")
-    _ed = data.get("eval_duration")
-    _td = data.get("total_duration")
-    _tps = f"{_ev / (_ed / 1e9):.2f}" if (_ev and _ed) else "n/a"
-    print(f"[phase0] <-- prompt_eval_count(read)={_pe} eval_count={_ev} "
-          f"load_duration={_ld} eval_duration={_ed} total_duration={_td} "
-          f"tokens_per_sec={_tps}", flush=True)
-    # -------------------------------------------------------------------------
-
-    return data["message"]["content"]
+    return r.json()["message"]["content"]
 
 
 def _first_json_object(s, start=0):
