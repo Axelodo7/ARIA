@@ -24,8 +24,18 @@ Usage
   python daemon.py                # start the scheduler (runs until stopped)
   python daemon.py --once sarah    # run a single cycle now (sarah|bobby|ava|tom|approvals)
 
-Run it under a process manager (Windows Task Scheduler / nssm, launchd, pm2)
-so it survives reboots. ARIA's voice loop (main.py) is separate.
+Run it under a process manager so it survives reboots — on Windows the supported
+path is NSSM; see scripts/install_service.md for the exact install/start/stop
+steps. Check health without tailing the log with scripts/service_status.py.
+ARIA's voice loop (main.py) is separate and stays manual.
+
+Service-safety (added for running head-less as a Windows service):
+  * All output goes to logs/daemon.log via the logger (survives with no console).
+  * On boot the service usually starts BEFORE Ollama; the daemon waits for Ollama
+    (with backoff) instead of crashing, then starts scheduling.
+  * A heartbeat line is logged every 30 minutes with each job's next run time.
+  * On a service stop it shuts the scheduler down cleanly, giving a running cycle
+    a bounded window to finish (writes are atomic, so a cut-off cycle is safe).
 
 ------------------------------------------------------------------------------
 SLACK SETUP — before the first run:
@@ -46,9 +56,11 @@ import traceback
 from datetime import datetime
 from logging.handlers import RotatingFileHandler
 
+import requests
 from apscheduler.schedulers.blocking import BlockingScheduler
 
 import config
+from brain.hermes_common import OLLAMA_URL
 from integrations import slack_bus
 from agents.sarah import Sarah
 from agents.tom import Tom
@@ -114,6 +126,93 @@ def poll_approvals():
                       f"{tb.strip().splitlines()[-1]}")
 
 
+# --- Startup dependency guard: wait for Ollama ------------------------------
+_OLLAMA_TAGS_URL = OLLAMA_URL.replace("/api/chat", "/api/tags")
+
+
+def _ollama_reachable(timeout=4):
+    """True if Ollama answers at localhost:11434. Never raises."""
+    try:
+        return requests.get(_OLLAMA_TAGS_URL, timeout=timeout).status_code == 200
+    except requests.exceptions.RequestException:
+        return False
+
+
+def wait_for_ollama(stop_event, initial_delay=5, max_delay=60):
+    """Block until Ollama is reachable, backing off between tries. On boot the
+    service almost always starts before Ollama — this holds scheduling until it's
+    up rather than letting the first cycles fail (or crashing). Returns True when
+    reachable, or False if a stop is requested first. Never raises on a connection
+    error; it just keeps retrying with a capped exponential backoff."""
+    if _ollama_reachable():
+        logger.info("Ollama reachable at %s.", _OLLAMA_TAGS_URL)
+        return True
+    delay, attempt = initial_delay, 0
+    while not stop_event.is_set():
+        attempt += 1
+        logger.warning("Ollama not reachable at localhost:11434 (attempt %d) — it "
+                       "likely hasn't started yet. Waiting %ds before retry; agent "
+                       "cycles are held until it is up.", attempt, delay)
+        if stop_event.wait(delay):
+            return False   # stop requested during the wait
+        if _ollama_reachable():
+            logger.info("Ollama is now reachable (after %d attempt(s)) — proceeding.",
+                        attempt)
+            return True
+        delay = min(max_delay, delay * 2)
+    return False
+
+
+# --- Heartbeat --------------------------------------------------------------
+def _heartbeat(scheduler):
+    """Log one 'still alive' line with each job's next fire time, so the log can
+    confirm the service is actually running in the quiet gaps between cycles."""
+    now = datetime.now(scheduler.timezone)
+    parts = []
+    for job in scheduler.get_jobs():
+        if job.id == "heartbeat":
+            continue
+        nxt = job.trigger.get_next_fire_time(None, now)
+        parts.append(f"{job.id} {nxt:%H:%M}" if nxt else f"{job.id} (none)")
+    logger.info("daemon alive — next runs: %s", ", ".join(parts) or "(no jobs)")
+
+
+# --- Graceful shutdown ------------------------------------------------------
+_SHUTDOWN_GRACE_SEC = 25
+
+
+def _graceful_shutdown(scheduler):
+    """Stop scheduling immediately, then give a running cycle a bounded window to
+    finish so it isn't cut off mid-write. State writes are atomic (SQLite commits,
+    single Slack posts, and bookmarks advanced only after a cycle succeeds), so
+    even if the window is exceeded nothing is left corrupted — the cycle simply
+    re-runs on its next schedule."""
+    if not scheduler.running:
+        return
+    logger.info("Shutdown: pausing scheduler (no new cycles), waiting up to %ds for "
+                "any running cycle to finish...", _SHUTDOWN_GRACE_SEC)
+    try:
+        scheduler.pause()
+    except Exception:
+        pass
+    finished = threading.Event()
+
+    def _sd():
+        try:
+            scheduler.shutdown(wait=True)   # blocks until running jobs complete
+        except Exception:
+            pass
+        finally:
+            finished.set()
+
+    threading.Thread(target=_sd, name="shutdown", daemon=True).start()
+    if finished.wait(_SHUTDOWN_GRACE_SEC):
+        logger.info("Scheduler shut down cleanly.")
+    else:
+        logger.warning("A cycle was still running after %ds — exiting anyway; atomic "
+                       "writes mean no state is left corrupted.", _SHUTDOWN_GRACE_SEC)
+
+
 # --- Job registry: id -> (label, callable, trigger kwargs) ------------------
 JOBS = [
     ("sarah", "sarah.cycle", sarah.cycle, {"trigger": "interval", "hours": 2}),
@@ -129,6 +228,10 @@ def build_scheduler():
     scheduler = BlockingScheduler()
     for job_id, label, fn, trigger in JOBS:
         scheduler.add_job(lambda l=label, f=fn: run_job(l, f), id=job_id, **trigger)
+    # Heartbeat is a health log, not an agent cycle — the agent schedules above
+    # are untouched. It logs every 30 minutes with the next run times.
+    scheduler.add_job(lambda: _heartbeat(scheduler), id="heartbeat",
+                      trigger="interval", minutes=30)
     return scheduler
 
 
@@ -183,6 +286,13 @@ def main(argv=None):
     stop_event = threading.Event()
     _install_signal_handlers(stop_event)
     print_banner(scheduler)
+
+    # Startup dependency guard: on boot the service usually starts before Ollama.
+    # Wait (with backoff) until it's reachable rather than letting the first cycles
+    # fail — but bail out cleanly if a stop is requested during the wait.
+    if not wait_for_ollama(stop_event):
+        logger.info("Stop requested before Ollama became reachable; exiting.")
+        return
     logger.info("Daemon started; scheduler running.")
 
     # Run the BlockingScheduler in a worker thread so the MAIN thread stays free
@@ -191,13 +301,13 @@ def main(argv=None):
     # would never see it — the short wait loop below fixes that on every OS.
     worker = threading.Thread(target=scheduler.start, name="scheduler", daemon=True)
     worker.start()
+    _heartbeat(scheduler)   # an immediate 'alive' line so the log shows life at once
     try:
         while worker.is_alive() and not stop_event.wait(0.5):
             pass
     except KeyboardInterrupt:
         pass
-    if scheduler.running:
-        scheduler.shutdown(wait=False)
+    _graceful_shutdown(scheduler)
     logger.info("Daemon stopped.")
     sys.exit(0)
 
