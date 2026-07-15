@@ -8,9 +8,11 @@ the permanent record). Audio I/O lives in main.py; this module is audio-free so
 it's testable text-only.
 """
 import re
+import uuid
 from collections import deque
 
 import config
+from brain import conv_memory
 from brain.hermes_common import call_hermes, business_context_block, cap_context
 from agents.base_agent import load_agent_prompt, strip_reasoning
 from integrations import slack_bus
@@ -338,6 +340,9 @@ class ConversationSession:
         self.agent = agent.lower()
         self.name = self.agent.capitalize()
         self.topic = topic
+        # Tags this conversation's turns in conversation_memory. Retrieval is
+        # global (ARIA must see agent conversations too), so it's a label, not a filter.
+        self.session_id = f"{self.agent}-{uuid.uuid4().hex[:8]}"
         self.model = (config.AGENT_CONVERSATION_MODELS.get(self.name)
                       or config.CONVERSATION_SPEED_MODEL)
         self.persona = load_agent_prompt(self.name)
@@ -385,7 +390,10 @@ class ConversationSession:
             "numbers from the CONTEXT below — quote real values (creative ids, ROAS, "
             "CPA, counts); never invent figures. If the context doesn't cover "
             "something, say so briefly.\n\n"
-            f"CONTEXT (loaded once at the start of this conversation):\n{self.context}"
+            # Stage 3: what was actually said before, across restarts and across
+            # agents. Hard-capped, so it can't grow the prompt over time.
+            + conv_memory.conversation_block()
+            + f"CONTEXT (loaded once at the start of this conversation):\n{self.context}"
         )
 
         def _generate(extra_system=""):
@@ -418,6 +426,11 @@ class ConversationSession:
             reply = _strip_identification(reply, self.name)
         self.history.append({"role": "user", "content": user_text})
         self.history.append({"role": "assistant", "content": reply})
+        # Stage 3: persist both sides so this survives a restart, and so ARIA can
+        # later answer "what did Bobby and I decide?". RAM history stays as-is for
+        # the live session; this is the durable record.
+        conv_memory.record_turn(self.session_id, "user", user_text)
+        conv_memory.record_turn(self.session_id, self.agent, reply)
         return reply
 
     def mirror(self, user_text, agent_text):

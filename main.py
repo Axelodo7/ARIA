@@ -17,6 +17,7 @@ import signal
 import sys
 import threading
 import time
+import uuid
 from logging.handlers import RotatingFileHandler
 
 try:
@@ -31,6 +32,10 @@ if PROJECT_ROOT not in sys.path:
 import config
 
 ACK_WAV = os.path.join(PROJECT_ROOT, "assets", "aria_ack.wav")
+
+# Tags this run's turns in conversation_memory (Stage 3). Retrieval is global —
+# ARIA recalls across sessions and across agents — so this is a label, not a filter.
+SESSION_ID = f"aria-{uuid.uuid4().hex[:8]}"
 
 # --- Logging (per-turn errors go here, not to the user's face) --------------
 _LOG_DIR = os.path.join(PROJECT_ROOT, "logs")
@@ -53,7 +58,7 @@ def main():
     # Heavy imports here (not at module top) so the progress messages are
     # accurate — each loads its resident model on the main thread before the GUI.
     from brain.aria_agent import Aria, warmup
-    from brain import conversation
+    from brain import conversation, conv_memory
     print("  warming up the fast model...")
     warmup()
     print("  loading Whisper model...")
@@ -98,6 +103,11 @@ def main():
         # just speak the confirmation. Direct answers speak the reply. Same path.
         hud.set_state("speaking")
         speak.speak(reply)
+
+        # Stage 3: persist the exchange AFTER speaking, so the durable write (and
+        # any rolling-summary compression it triggers) never delays the reply.
+        conv_memory.record_turn(SESSION_ID, "user", text)
+        conv_memory.record_turn(SESSION_ID, "aria", reply)
 
     mute_sec = config.POST_TTS_MUTE_MS / 1000.0
 

@@ -181,6 +181,12 @@ NUM_CTX = int(_get_float("NUM_CTX", 6144))
 # grounding — the scheduled cycles read live stats and are unaffected.
 CONVERSATION_CONTEXT_TOKEN_CAP = int(_get_float("CONVERSATION_CONTEXT_TOKEN_CAP", 1200))
 
+# --- Conversation memory (Stage 3) ------------------------------------------
+# Voice turns persist so ARIA remembers across main.py restarts. Turns older than
+# this are pruned automatically so the DB can't grow forever; what they said
+# survives (compressed) in the rolling summary.
+CONVERSATION_MEMORY_DAYS = int(_get_float("CONVERSATION_MEMORY_DAYS", 7))
+
 # Conversation mode (Step 7A) uses a FAST LOCAL model for live back-and-forth
 # chat — NOT each agent's heavier scheduled-cycle model (deepseek-r1:14b stays).
 # CONVERSATION_SPEED_MODEL is the single knob for the speed/accuracy trade: swap

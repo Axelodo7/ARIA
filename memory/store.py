@@ -12,7 +12,7 @@ The database file is created on first use.
 """
 import os
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "aria_memory.db")
 
@@ -44,6 +44,30 @@ def _connect():
             event_type TEXT,
             summary    TEXT,
             payload_id TEXT
+        )
+        """
+    )
+    # Stage 3: every voice turn, so conversations survive a main.py restart.
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS conversation_memory (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp  TEXT,
+            speaker    TEXT,
+            content    TEXT,
+            session_id TEXT
+        )
+        """
+    )
+    # The rolling summary of turns older than the verbatim window. Keyed by scope
+    # ('global') because ARIA must recall agent conversations too, not just her own.
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS conversation_summary (
+            scope      TEXT PRIMARY KEY,
+            summary    TEXT,
+            upto_id    INTEGER,
+            updated_at TEXT
         )
         """
     )
@@ -121,3 +145,81 @@ def get_recent_memories(agent, limit=10):
             (agent, limit),
         ).fetchall()
     return [dict(zip(_MEMORY_COLS, r)) for r in rows]
+
+
+# --- Conversation memory (Stage 3) ------------------------------------------
+_TURN_COLS = ("id", "timestamp", "speaker", "content", "session_id")
+_SUMMARY_SCOPE = "global"
+
+
+def add_conversation_turn(session_id, speaker, content):
+    """Record one voice turn. `speaker` is 'user', 'aria', or an agent name.
+    Returns the new row id."""
+    content = (content or "").strip()
+    if not content:
+        return None
+    now = datetime.now(timezone.utc).isoformat()
+    with _connect() as conn:
+        cur = conn.execute(
+            "INSERT INTO conversation_memory (timestamp, speaker, content, session_id) "
+            "VALUES (?, ?, ?, ?)", (now, speaker, content, session_id))
+        conn.commit()
+    return cur.lastrowid
+
+
+def get_recent_conversation_turns(limit=6):
+    """The most recent turns across ALL sessions, NEWEST FIRST — global on purpose,
+    so ARIA can recall what you and an agent discussed, not just her own turns."""
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT id, timestamp, speaker, content, session_id FROM conversation_memory "
+            "ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+    return [dict(zip(_TURN_COLS, r)) for r in rows]
+
+
+def get_conversation_turns_to_compress(upto_id, exclude_ids, limit=60):
+    """Turns not yet folded into the summary and not in the verbatim window —
+    i.e. the ones that have just aged out. OLDEST FIRST."""
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT id, timestamp, speaker, content, session_id FROM conversation_memory "
+            "WHERE id > ? ORDER BY id ASC LIMIT ?", (upto_id or 0, limit)).fetchall()
+    turns = [dict(zip(_TURN_COLS, r)) for r in rows]
+    keep = set(exclude_ids or ())
+    return [t for t in turns if t["id"] not in keep]
+
+
+def get_conversation_summary(scope=_SUMMARY_SCOPE):
+    """Return (summary_text, upto_id). ('', 0) when nothing is summarized yet."""
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT summary, upto_id FROM conversation_summary WHERE scope = ?",
+            (scope,)).fetchone()
+    return (row[0] or "", row[1] or 0) if row else ("", 0)
+
+
+def set_conversation_summary(summary, upto_id, scope=_SUMMARY_SCOPE):
+    """Store the rolling summary and how far it covers."""
+    now = datetime.now(timezone.utc).isoformat()
+    with _connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO conversation_summary (scope, summary, upto_id, updated_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(scope) DO UPDATE SET
+                summary    = excluded.summary,
+                upto_id    = excluded.upto_id,
+                updated_at = excluded.updated_at
+            """, (scope, summary, upto_id, now))
+        conn.commit()
+    return upto_id
+
+
+def prune_conversations(days):
+    """Delete turns older than `days`. Returns the number removed. The summary is
+    left alone — it's the compressed trace of what those turns said."""
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    with _connect() as conn:
+        cur = conn.execute("DELETE FROM conversation_memory WHERE timestamp < ?", (cutoff,))
+        conn.commit()
+    return cur.rowcount

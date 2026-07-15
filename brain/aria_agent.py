@@ -24,6 +24,7 @@ from datetime import datetime
 from pathlib import Path
 
 import config
+from brain import conv_memory
 from brain.hermes_common import (call_hermes, parse_tool_call, tools_block,
                                  business_context_block, cap_context,
                                  append_business_fact)
@@ -314,9 +315,13 @@ class Aria:
         num_predict = None if reasoning else 64
         keep_alive = None if reasoning else "30m"
 
-        # Business context first, then ARIA's persona, then the tool-call format.
+        # Business context, ARIA's persona, then (Stage 3) what was actually said
+        # in recent conversations — including with the agents — then the tool
+        # format. The block is hard-capped, so this can't grow the prompt over time.
         prompt = (business_context_block()
-                  + (system_prompt or self.system_prompt) + tools_block(TOOLS))
+                  + (system_prompt or self.system_prompt)
+                  + conv_memory.conversation_block()
+                  + tools_block(TOOLS))
         messages = [
             {"role": "system", "content": prompt},
             {"role": "system", "content": f"Current date and time: {datetime.now():%A %Y-%m-%d %H:%M:%S}."},
