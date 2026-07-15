@@ -14,6 +14,7 @@ model (deepseek-r1:14b) pulled. Ollama-down prints a clear error, not a tracebac
 """
 import os
 import sys
+import tempfile
 
 try:
     sys.stdout.reconfigure(encoding="utf-8")  # UTF-8 safe on Windows consoles
@@ -27,6 +28,13 @@ if PROJECT_ROOT not in sys.path:
 import requests
 
 import config
+from memory import store
+
+# Isolate the DB: this test fires a real Bobby cycle, which writes proposal_filed
+# rows. Against the real aria_memory.db those rows would make Bobby's suppression
+# silence the next REAL 09:00 cycle over proposals that were never posted.
+store.DB_PATH = os.path.join(tempfile.gettempdir(), f"test_bobby_{os.getpid()}.db")
+
 from brain.hermes_common import OLLAMA_URL
 from integrations import ads_platform
 from agents.bobby import Bobby

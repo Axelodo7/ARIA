@@ -14,6 +14,8 @@ import os
 import sqlite3
 from datetime import datetime, timedelta, timezone
 
+import config
+
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "aria_memory.db")
 
 # Valid agent_memory event types (kept here as the single source of truth).
@@ -71,7 +73,20 @@ def _connect():
         )
         """
     )
+    _migrate(conn)
     return conn
+
+
+def _migrate(conn):
+    """Idempotent schema top-ups for databases created by an earlier version."""
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(agent_memory)")}
+    if "dry_run" not in cols:
+        # Marks rows written by a dry run. Without this, a DRY_RUN test that fires
+        # an agent cycle writes proposal_filed rows that look identical to real
+        # ones — and Bobby's suppression would then silence a REAL cycle over a
+        # proposal that was never actually posted to Slack.
+        conn.execute("ALTER TABLE agent_memory ADD COLUMN dry_run INTEGER NOT NULL DEFAULT 0")
+        conn.commit()
 
 
 def get_bookmark(agent_name):
@@ -106,15 +121,19 @@ def set_bookmark(agent_name, ts):
 _MEMORY_COLS = ("id", "agent", "timestamp", "event_type", "summary", "payload_id")
 
 
-def add_memory(agent, event_type, summary, payload_id=None):
+def add_memory(agent, event_type, summary, payload_id=None, dry_run=None):
     """Record one agent-memory event. `summary` is a short Python-written line
-    (never model-generated). Returns the new row id. Timestamp is UTC ISO now."""
+    (never model-generated). Returns the new row id. Timestamp is UTC ISO now.
+
+    Rows are stamped with the run mode (defaulting to config.DRY_RUN) so a dry run
+    can never be mistaken for real work — see get_recent_memories."""
     now = datetime.now(timezone.utc).isoformat()
+    dry = int(bool(config.DRY_RUN if dry_run is None else dry_run))
     with _connect() as conn:
         cur = conn.execute(
-            "INSERT INTO agent_memory (agent, timestamp, event_type, summary, payload_id) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (agent, now, event_type, summary, payload_id),
+            "INSERT INTO agent_memory (agent, timestamp, event_type, summary, payload_id, dry_run) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (agent, now, event_type, summary, payload_id, dry),
         )
         conn.commit()
     return cur.lastrowid
@@ -123,27 +142,38 @@ def add_memory(agent, event_type, summary, payload_id=None):
 def update_memory_by_payload(payload_id, event_type):
     """Transition the memory row(s) for `payload_id` to a new event_type — used
     when the approvals poller sees a ✅/❌ (proposal_filed -> approved/rejected).
+    Scoped to the current run mode so a dry run can't rewrite real history.
     Returns the number of rows updated (0 if none match). Idempotent."""
     if not payload_id:
         return 0
     with _connect() as conn:
         cur = conn.execute(
-            "UPDATE agent_memory SET event_type = ? WHERE payload_id = ?",
-            (event_type, payload_id),
+            "UPDATE agent_memory SET event_type = ? WHERE payload_id = ? AND dry_run = ?",
+            (event_type, payload_id, int(bool(config.DRY_RUN))),
         )
         conn.commit()
     return cur.rowcount
 
 
-def get_recent_memories(agent, limit=10):
+def get_recent_memories(agent, limit=10, mode_isolated=True):
     """Return this agent's most recent memories, NEWEST FIRST, as a list of dicts
-    with keys id/agent/timestamp/event_type/summary/payload_id."""
+    with keys id/agent/timestamp/event_type/summary/payload_id.
+
+    Isolated by run mode by default: a REAL run never sees dry-run rows, and a dry
+    run never sees real ones. This matters because Bobby's suppression reads this —
+    a dry-run proposal was never posted to Slack, so it must not silence a real
+    cycle (and vice versa). Pass mode_isolated=False to inspect everything.
+    """
+    sql = ("SELECT id, agent, timestamp, event_type, summary, payload_id "
+           "FROM agent_memory WHERE agent = ?")
+    params = [agent]
+    if mode_isolated:
+        sql += " AND dry_run = ?"
+        params.append(int(bool(config.DRY_RUN)))
+    sql += " ORDER BY id DESC LIMIT ?"
+    params.append(limit)
     with _connect() as conn:
-        rows = conn.execute(
-            "SELECT id, agent, timestamp, event_type, summary, payload_id "
-            "FROM agent_memory WHERE agent = ? ORDER BY id DESC LIMIT ?",
-            (agent, limit),
-        ).fetchall()
+        rows = conn.execute(sql, params).fetchall()
     return [dict(zip(_MEMORY_COLS, r)) for r in rows]
 
 

@@ -18,6 +18,7 @@ minutes — 3 cycles is ~10 minutes.
 import os
 import re
 import sys
+import tempfile
 import time
 
 try:
@@ -34,6 +35,13 @@ if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
 import config
+from memory import store
+
+# Isolate the DB: this test fires real Ava cycles, which rotate her pillar
+# pointer and write proposal memory — both real state the next scheduled cycle
+# would inherit.
+store.DB_PATH = os.path.join(tempfile.gettempdir(), f"test_ava_{os.getpid()}.db")
+
 from agents.ava import Ava, CONTENT_PILLARS, find_fabricated_claims, _PILLAR_STATE_KEY
 from brain.hermes_common import load_business_context
 from memory import store

@@ -66,11 +66,14 @@ def reset():
 
 
 def seed(event, summary, payload_id, age_days=0):
-    """Insert a memory row aged `age_days` into the past."""
+    """Insert a memory row aged `age_days` into the past. Stamped with the current
+    run mode, since reads are mode-isolated (see store.get_recent_memories)."""
     ts = (datetime.now(timezone.utc) - timedelta(days=age_days)).isoformat()
     with store._connect() as conn:
-        conn.execute("INSERT INTO agent_memory (agent, timestamp, event_type, summary, payload_id) "
-                     "VALUES (?,?,?,?,?)", ("Bobby", ts, event, summary, payload_id))
+        conn.execute("INSERT INTO agent_memory "
+                     "(agent, timestamp, event_type, summary, payload_id, dry_run) "
+                     "VALUES (?,?,?,?,?,?)",
+                     ("Bobby", ts, event, summary, payload_id, int(bool(config.DRY_RUN))))
         conn.commit()
 
 

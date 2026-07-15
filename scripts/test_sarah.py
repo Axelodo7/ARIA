@@ -14,6 +14,7 @@ Requires:
 """
 import os
 import sys
+import tempfile
 import time
 
 try:
@@ -30,6 +31,13 @@ import requests
 import config
 from integrations import slack_bus
 from brain.hermes_common import OLLAMA_URL
+from memory import store
+
+# Isolate the DB: this test fires a real Sarah cycle, which advances her Slack
+# bookmark and writes digest memory. Against the real aria_memory.db that would
+# make the next REAL cycle skip feedback it never actually digested.
+store.DB_PATH = os.path.join(tempfile.gettempdir(), f"test_sarah_{os.getpid()}.db")
+
 from agents.sarah import Sarah
 
 FEEDBACK_CHANNEL = config.CHANNELS["feedback"]

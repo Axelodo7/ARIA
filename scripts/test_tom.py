@@ -16,6 +16,7 @@ Requires DRY_RUN=False in .env for real Slack, Ollama running with Tom's model
 """
 import os
 import sys
+import tempfile
 
 try:
     sys.stdout.reconfigure(encoding="utf-8")
@@ -31,6 +32,12 @@ import requests
 import config
 from brain.hermes_common import OLLAMA_URL
 from integrations import git_repo
+from memory import store
+
+# Isolate the DB: this test fires a real Tom cycle, which writes task/proposal
+# memory that would otherwise pollute real history.
+store.DB_PATH = os.path.join(tempfile.gettempdir(), f"test_tom_{os.getpid()}.db")
+
 from agents.tom import Tom
 
 

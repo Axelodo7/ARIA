@@ -15,6 +15,7 @@ not exist yet); context reads from the real #ads channel. Needs Ollama + hermes3
 import os
 import re
 import sys
+import tempfile
 import time
 
 try:
@@ -32,6 +33,13 @@ import requests
 
 import config
 from brain.hermes_common import OLLAMA_URL
+from memory import store
+
+# Isolate the DB: agent_reply now persists every turn to conversation_memory
+# (Stage 3), so this test would otherwise write scripted test dialogue into the
+# real conversation history ARIA reads back.
+store.DB_PATH = os.path.join(tempfile.gettempdir(), f"test_convmode_{os.getpid()}.db")
+
 from brain import conversation
 
 OPEN_PHRASE = "let me talk to Bobby about the cr_B pause proposal"
