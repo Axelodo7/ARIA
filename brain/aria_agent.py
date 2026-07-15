@@ -41,6 +41,30 @@ _AGENT_CHANNELS = {"sarah": "feedback", "tom": "dev", "ava": "support_intel", "b
 # verbatim rather than letting the fast model rephrase (and possibly fabricate).
 _STRUCTURED_RELAY = {"check_pending_approvals", "read_channel", "remember"}
 
+
+# --- What a structured relay leaves in conversation memory -------------------
+# A relay is a DATA DUMP, not dialogue. Storing one verbatim was actively harmful:
+# once "You have 7 pending: ..." sat in memory as ARIA's answer, gemma3 reused it
+# as the answer to unrelated questions (a pricing question misrouted 3/3 purely
+# from that context, with no tool call — and an explicit "never reuse a previous
+# answer" instruction did NOT help; in-context examples beat instructions on this
+# model). Each repeat was then recorded too, reinforcing itself.
+#
+# So relays are remembered by REFERENCE instead: enough for continuity ("what did
+# we just do?" -> "you checked approvals") but with no raw data to copy. The spoken
+# reply is unaffected — the user still hears the full list.
+_RELAY_APPROVALS_NOTE = "(read out the pending approvals list)"
+
+
+def _relay_channel_note(channel_key):
+    ch = str(channel_key or "").lstrip("#").replace("_", "-")
+    return f"(read out the latest from #{ch})" if ch else "(read out a channel)"
+
+
+def _relay_status_note(agent, channel_key):
+    ch = str(channel_key or "").replace("_", "-")
+    return f"(relayed {agent.capitalize()}'s latest from #{ch})"
+
 # Explicit "remember this" phrasing -> save a business-memory fact deterministically
 # (Stage 2), no model call. Matches "remember [that] X", "note [that] X",
 # "make a note [that] X", tolerating a leading "hey jarvis" / "please".
@@ -289,8 +313,15 @@ class Aria:
     def think(self, user_text, conversation_history=None, system_prompt=None,
               reasoning=False):
         """Reason over the user's utterance. Returns {reply, tool_calls,
-        dispatched}. Fast model by default; pass reasoning=True to route the
-        whole turn through the slow model when depth is genuinely needed."""
+        dispatched, memory_note}. Fast model by default; pass reasoning=True to
+        route the whole turn through the slow model when depth is genuinely needed.
+
+        `memory_note` is set ONLY when the reply is a structured relay — a raw
+        readout of Slack data (the approvals queue, an agent's latest, a channel's
+        last message). It is a short reference to store in conversation memory
+        INSTEAD of the reply. See _RELAY_* below for why that matters; callers that
+        persist a turn should record `memory_note or reply`.
+        """
         # Stage 2 — explicit "remember/note that X" saves a business-memory fact
         # deterministically (Python writes the timestamped line), no model call.
         fact = _parse_remember(user_text)
@@ -317,13 +348,15 @@ class Aria:
             ch = _AGENT_STATUS_CHANNELS[agent]
             return {"reply": self._status_read(agent), "dispatched": False,
                     "tool_calls": [{"name": "read_channel",
-                                    "arguments": {"channel_name": ch, "limit": 5}}]}
+                                    "arguments": {"channel_name": ch, "limit": 5}}],
+                    "memory_note": _relay_status_note(agent, ch)}
 
         # Deterministic approvals query ("what's pending", "anything to approve").
         # Narrow on purpose — a business question must never land here.
         if _parse_approvals_query(user_text):
             return {"reply": self._check_pending_approvals({}), "dispatched": False,
-                    "tool_calls": [{"name": "check_pending_approvals", "arguments": {}}]}
+                    "tool_calls": [{"name": "check_pending_approvals", "arguments": {}}],
+                    "memory_note": _RELAY_APPROVALS_NOTE}
 
         # Deterministic channel-direct query ("what's in #ads"). Approvals routes
         # to the pending-approvals relay; other channels relay their last message.
@@ -331,9 +364,11 @@ class Aria:
         if ckey:
             if ckey == "approvals":
                 return {"reply": self._check_pending_approvals({}), "dispatched": False,
-                        "tool_calls": [{"name": "check_pending_approvals", "arguments": {}}]}
+                        "tool_calls": [{"name": "check_pending_approvals", "arguments": {}}],
+                        "memory_note": _RELAY_APPROVALS_NOTE}
             return {"reply": self._read_channel({"channel_name": ckey}), "dispatched": False,
-                    "tool_calls": [{"name": "read_channel", "arguments": {"channel_name": ckey}}]}
+                    "tool_calls": [{"name": "read_channel", "arguments": {"channel_name": ckey}}],
+                    "memory_note": _relay_channel_note(ckey)}
 
         # Garbled / unintelligible very-short input that matched no route — ask the
         # user to repeat rather than free-associating a hallucinated answer (Bug 2).
@@ -378,9 +413,20 @@ class Aria:
                 break
             result = self.tool_handlers[name](call.get("arguments", {}) or {})
             # Fix #3 — structured tools speak their Python-formatted result
-            # verbatim; the model never rephrases it (no fabrication).
+            # verbatim; the model never rephrases it (no fabrication). The same
+            # rawness is why it must NOT be stored verbatim — remember it by
+            # reference (remember/'Noted, sir.' carries no data, so it's fine as-is).
             if name in _STRUCTURED_RELAY:
-                return {"reply": str(result), "tool_calls": tool_calls, "dispatched": dispatched}
+                args = call.get("arguments") or {}
+                if name == "read_channel":
+                    note = _relay_channel_note(args.get("channel_name")
+                                               or args.get("channel"))
+                elif name == "check_pending_approvals":
+                    note = _RELAY_APPROVALS_NOTE
+                else:
+                    note = None
+                return {"reply": str(result), "tool_calls": tool_calls,
+                        "dispatched": dispatched, "memory_note": note}
             messages.append({"role": "assistant", "content": reply})
             messages.append({"role": "tool",
                              "content": json.dumps({"name": name, "content": str(result)})})

@@ -106,8 +106,11 @@ def main():
 
         # Stage 3: persist the exchange AFTER speaking, so the durable write (and
         # any rolling-summary compression it triggers) never delays the reply.
+        # A structured relay (approvals queue, channel readout) is remembered by
+        # REFERENCE — you heard the full list, but storing that raw dump would give
+        # the model a template it then reuses for unrelated questions.
         conv_memory.record_turn(SESSION_ID, "user", text)
-        conv_memory.record_turn(SESSION_ID, "aria", reply)
+        conv_memory.record_turn(SESSION_ID, "aria", result.get("memory_note") or reply)
 
     mute_sec = config.POST_TTS_MUTE_MS / 1000.0
 
