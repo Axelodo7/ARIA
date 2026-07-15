@@ -8,13 +8,73 @@ that a human signs off by reacting with an emoji.
 All channel names and persona emoji come from config.py — nothing is hardcoded
 here. While config.DRY_RUN is True, write operations are logged instead of sent.
 """
+import logging
+import socket
+import ssl
 import sys
+import time
+import urllib.error
 
 from slack_sdk import WebClient
 
 import config
 
 client = WebClient(token=config.SLACK_BOT_TOKEN)
+logger = logging.getLogger("aria.slack")
+
+# --- Bounded retry for transient TLS/connection failures ---------------------
+# This machine intermittently fails the TLS handshake to slack.com ("Hostname
+# mismatch") in short episodes that self-recover within minutes — a whole agent
+# cycle shouldn't die on a hiccup that would succeed seconds later.
+#
+# SAFETY: we retry ONLY failures raised while establishing the connection or
+# during the TLS handshake, i.e. definitively BEFORE any request bytes reached
+# Slack. That is what makes retrying a chat_postMessage safe here — the message
+# provably never arrived, so a retry cannot duplicate it. Certificate
+# verification itself is untouched; nothing here weakens it.
+_RETRY_ATTEMPTS = 3
+_RETRY_BACKOFF = (2, 6)     # sleep after attempts 1 and 2 -> ~8s worst case
+
+
+def _is_pre_send_transient(exc):
+    """True only for connection/handshake failures that happened before the
+    request was transmitted.
+
+    Deliberately NOT retried:
+      * SlackApiError    — a real answer from Slack (invalid_auth,
+                           channel_not_found); retrying would mask the bug.
+      * urllib HTTPError — a real HTTP status (429/5xx) with its own semantics.
+      * timeouts         — ambiguous: the request may already have been
+                           delivered, so a retry could double-post.
+    """
+    if isinstance(exc, urllib.error.HTTPError):
+        return False          # HTTPError subclasses URLError — must be excluded first
+    if isinstance(exc, urllib.error.URLError):
+        exc = exc.reason if exc.reason is not None else exc
+    if isinstance(exc, (socket.timeout, TimeoutError)):
+        return False          # ambiguous even when wrapped in a URLError
+    # Each of these can only occur before any request bytes are sent:
+    #   cert verification -> TLS handshake; gaierror -> DNS never resolved;
+    #   refused -> the TCP connection was never established.
+    return isinstance(exc, (ssl.SSLCertVerificationError, socket.gaierror,
+                            ConnectionRefusedError))
+
+
+def _call(label, fn, **kwargs):
+    """Invoke a Slack API call, retrying only pre-send transient failures."""
+    for attempt in range(1, _RETRY_ATTEMPTS + 1):
+        try:
+            return fn(**kwargs)
+        except Exception as e:
+            if not _is_pre_send_transient(e) or attempt == _RETRY_ATTEMPTS:
+                raise
+            delay = _RETRY_BACKOFF[attempt - 1]
+            logger.warning(
+                "%s: transient connection/TLS failure (attempt %d/%d) — %s: %s. "
+                "Nothing was sent to Slack; retrying in %ds.",
+                label, attempt, _RETRY_ATTEMPTS, type(e).__name__,
+                str(e)[:120], delay)
+            time.sleep(delay)
 
 
 def _safe_print(line):
@@ -38,9 +98,8 @@ def post_as(name, icon, channel, text):
     if config.DRY_RUN:
         _safe_print(f"[DRY_RUN] post_as {name} {icon} -> {channel}: {text!r}")
         return None
-    resp = client.chat_postMessage(
-        channel=channel, text=text, username=name, icon_emoji=icon
-    )
+    resp = _call("post_as", client.chat_postMessage,
+                 channel=channel, text=text, username=name, icon_emoji=icon)
     return resp["ts"]
 
 
@@ -52,7 +111,8 @@ def read_channel(channel_id, limit=50, since_ts=None):
     are returned, so callers can skip content they've already processed.
     Returns a list of message text strings.
     """
-    resp = client.conversations_history(channel=channel_id, limit=limit)
+    resp = _call("read_channel", client.conversations_history,
+                 channel=channel_id, limit=limit)
     messages = resp["messages"]
     if since_ts is not None:
         messages = [m for m in messages if float(m.get("ts", "0")) > float(since_ts)]
@@ -64,7 +124,8 @@ def history(channel_id, limit=50):
 
     Useful when you need more than the text (e.g. deleting messages by ts).
     """
-    resp = client.conversations_history(channel=channel_id, limit=limit)
+    resp = _call("history", client.conversations_history,
+                 channel=channel_id, limit=limit)
     return resp["messages"]
 
 
@@ -77,7 +138,7 @@ def delete_message(channel_id, ts):
     if config.DRY_RUN:
         print(f"[DRY_RUN] delete_message {channel_id} ts={ts}")
         return
-    client.chat_delete(channel=channel_id, ts=ts)
+    _call("delete_message", client.chat_delete, channel=channel_id, ts=ts)
 
 
 def request_approval(agent_name, description, payload_id):
@@ -95,12 +156,11 @@ def request_approval(agent_name, description, payload_id):
     if config.DRY_RUN:
         _safe_print(f"[DRY_RUN] request_approval {agent_name} [{payload_id}]: {description!r}")
         return None
-    resp = client.chat_postMessage(
-        channel=config.CHANNELS["approvals"],
-        text=text,
-        username=agent_name,
-        icon_emoji=icon,
-    )
+    resp = _call("request_approval", client.chat_postMessage,
+                 channel=config.CHANNELS["approvals"],
+                 text=text,
+                 username=agent_name,
+                 icon_emoji=icon)
     return resp["ts"]
 
 
@@ -110,7 +170,8 @@ def check_approval(channel_id, ts):
     "approved" if a ✅ reaction is present, "rejected" if ❌, otherwise
     "pending". ✅ takes precedence if somehow both are present.
     """
-    resp = client.reactions_get(channel=channel_id, timestamp=ts)
+    resp = _call("check_approval", client.reactions_get,
+                 channel=channel_id, timestamp=ts)
     reactions = {r["name"] for r in resp["message"].get("reactions", [])}
     if "white_check_mark" in reactions:
         return "approved"
