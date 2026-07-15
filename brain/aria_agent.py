@@ -112,6 +112,30 @@ _CHANNEL_RES = [
 ]
 
 
+# Genuine approvals queries -> read #approvals deterministically. The model is NOT
+# given a check_pending_approvals tool (see TOOLS): MEASURED, it misfired that tool
+# on a pricing question (5/5 with conversation memory in the prompt, still 1/5 after
+# reordering). "Is anything awaiting my decision" has a right answer, so per
+# Principle 1 it lives in code and the model can't get it wrong. Deliberately narrow
+# — it must never swallow a business question like "what are the pricing tiers".
+_APPROVALS_RES = [
+    re.compile(r"\bwhat'?s\s+(?:in\s+)?(?:the\s+)?#?approvals?\b", re.IGNORECASE),
+    re.compile(r"\b(?:in|check)\s+#?approvals\b", re.IGNORECASE),
+    re.compile(r"\bwhat'?s\s+pending\b", re.IGNORECASE),
+    re.compile(r"\banything\s+pending\b", re.IGNORECASE),
+    re.compile(r"\banything\s+(?:to|needing|that needs)\s+(?:approv|sign)", re.IGNORECASE),
+    re.compile(r"\bpending\s+(?:approvals?|proposals?|items?)\b", re.IGNORECASE),
+    re.compile(r"\bapprovals?\s+(?:list|queue)\b", re.IGNORECASE),
+    re.compile(r"\bdo\s+I\s+need\s+to\s+(?:approve|sign)", re.IGNORECASE),
+    re.compile(r"\bwaiting\s+(?:on|for)\s+(?:my\s+)?(?:approval|sign)", re.IGNORECASE),
+]
+
+
+def _parse_approvals_query(text):
+    """True only for a genuine 'what is awaiting my decision' question."""
+    return any(rx.search(text or "") for rx in _APPROVALS_RES)
+
+
 def _parse_status_query(text):
     """Return the agent name for an explicit 'what did X find'-style query."""
     for rx in _STATUS_RES:
@@ -213,9 +237,10 @@ TOOLS = [
          "channel_name": {"type": "string"},
          "limit": {"type": "integer", "description": "Messages to read (default 10)."}},
          "required": ["channel_name"]}},
-    {"name": "check_pending_approvals",
-     "description": "List #approvals items still awaiting the user's decision.",
-     "parameters": {"type": "object", "properties": {}}},
+    # NOTE: check_pending_approvals is deliberately NOT offered to the model.
+    # Approvals queries are matched deterministically in think() (_parse_approvals_
+    # query). As a tool it misfired on business questions — a pricing question was
+    # answered with the approvals list — so the model no longer gets that choice.
     {"name": "remember",
      "description": ("Save a durable business fact the team should know (milestone, "
                      "launch, policy change). Use when told to remember/note it."),
@@ -294,6 +319,12 @@ class Aria:
                     "tool_calls": [{"name": "read_channel",
                                     "arguments": {"channel_name": ch, "limit": 5}}]}
 
+        # Deterministic approvals query ("what's pending", "anything to approve").
+        # Narrow on purpose — a business question must never land here.
+        if _parse_approvals_query(user_text):
+            return {"reply": self._check_pending_approvals({}), "dispatched": False,
+                    "tool_calls": [{"name": "check_pending_approvals", "arguments": {}}]}
+
         # Deterministic channel-direct query ("what's in #ads"). Approvals routes
         # to the pending-approvals relay; other channels relay their last message.
         ckey = _parse_channel_query(user_text)
@@ -315,13 +346,16 @@ class Aria:
         num_predict = None if reasoning else 64
         keep_alive = None if reasoning else "30m"
 
-        # Business context, ARIA's persona, then (Stage 3) what was actually said
-        # in recent conversations — including with the agents — then the tool
-        # format. The block is hard-capped, so this can't grow the prompt over time.
+        # Order matters, and it is load-bearing. Conversation memory goes AFTER the
+        # tools block, never between the persona and it: MEASURED, putting a
+        # transcript immediately before "to call a tool, respond with <tool_call>"
+        # primes the model to emit a tool call — a pricing question misfired to
+        # check_pending_approvals 3/3 with that ordering and 0/3 with this one.
+        # Recent conversation also belongs closest to the user's message.
         prompt = (business_context_block()
                   + (system_prompt or self.system_prompt)
-                  + conv_memory.conversation_block()
-                  + tools_block(TOOLS))
+                  + tools_block(TOOLS)
+                  + conv_memory.conversation_block())
         messages = [
             {"role": "system", "content": prompt},
             {"role": "system", "content": f"Current date and time: {datetime.now():%A %Y-%m-%d %H:%M:%S}."},
