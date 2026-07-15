@@ -15,6 +15,7 @@ Everything below uses these two paths — adjust if yours differ:
 | Project root | `C:\Users\Ayyan\Desktop\aria` |
 | Daemon service | `ARIADaemon` (must match `scripts/service_status.py`) |
 | Ollama service | `OllamaServe` (from step 0) |
+| Dashboard service | `ARIADashboard` (step 7) — http://localhost:8000 |
 
 ---
 
@@ -264,3 +265,74 @@ Work down this list:
 
 Run `daemon.py` by hand once to sanity-check the environment before blaming the
 service: `python C:\Users\Ayyan\Desktop\aria\daemon.py` (Ctrl+C to stop).
+
+---
+
+## 7. The dashboard as a service (`ARIADashboard`)
+
+Keeps the read-only mission-control page at **http://localhost:8000** up after
+boot, so you can check the team without a terminal. `dashboard/app.py` is a
+viewer: it opens SQLite `mode=ro`, never writes `aria_memory.db` or
+`docs/memory.md`, never posts to Slack (reads only), and never triggers a cycle.
+
+Test it by hand first — `python C:\Users\Ayyan\Desktop\aria\dashboard\app.py` —
+then Ctrl+C and install. Administrator PowerShell:
+
+```powershell
+nssm install ARIADashboard "C:\Users\Ayyan\AppData\Local\Programs\Python\Python312\python.exe" "C:\Users\Ayyan\Desktop\aria\dashboard\app.py"
+
+# working directory = project root (so .env, memory/, docs/ resolve)
+nssm set ARIADashboard AppDirectory "C:\Users\Ayyan\Desktop\aria"
+nssm set ARIADashboard Start SERVICE_AUTO_START
+
+# uvicorn logs to stdout; capture + rotate it
+nssm set ARIADashboard AppStdout "C:\Users\Ayyan\Desktop\aria\logs\dashboard.stdout.log"
+nssm set ARIADashboard AppStderr "C:\Users\Ayyan\Desktop\aria\logs\dashboard.stdout.log"
+nssm set ARIADashboard AppRotateFiles 1
+nssm set ARIADashboard AppRotateOnline 1
+nssm set ARIADashboard AppRotateBytes 10485760
+
+# graceful stop (uvicorn handles Ctrl+C) + restart if it ever exits
+nssm set ARIADashboard AppStopMethodConsole 10000
+nssm set ARIADashboard AppExit Default Restart
+nssm set ARIADashboard AppThrottle 10000
+nssm set ARIADashboard Description "ARIA mission control (read-only dashboard on :8000)"
+
+nssm start ARIADashboard
+```
+
+**No `DependOnService` here, deliberately.** The dashboard doesn't need Ollama or
+the daemon — with either down it still serves and just shows those panels as
+`unavailable`, which is exactly when you most want to look at it. Making it depend
+on them would take the page down at the worst moment.
+
+### Verify
+
+```powershell
+nssm status ARIADashboard          # SERVICE_RUNNING
+curl.exe -s -o NUL -w "%{http_code}`n" http://localhost:8000/   # 200
+```
+
+Then open <http://localhost:8000>. It auto-refreshes every 15s.
+
+### Manage
+
+```powershell
+nssm start|stop|restart ARIADashboard
+nssm stop ARIADashboard; nssm remove ARIADashboard confirm    # uninstall
+```
+
+### If it won't start
+
+1. **Stops immediately** — check `logs\dashboard.stdout.log` for a traceback. The
+   usual cause is the wrong `python.exe` (it needs the interpreter with `fastapi`
+   and `uvicorn` — `pip install -r requirements.txt`).
+2. **`curl` gets no answer but the service is "running"** — port `8000` is already
+   taken (an earlier `python dashboard/app.py` still open in a terminal?). Close it,
+   or change `PORT` in `dashboard/app.py`.
+3. **Page loads but panels say "unavailable"** — that's the design, not a crash:
+   each panel degrades on its own. "Service health" needs `sc query`; "Pending
+   approvals" needs Slack (it'll say unavailable during the SSL flaps); "Agent
+   activity" needs `memory/aria_memory.db` to exist.
+4. **Blank/refused from another machine** — intended. It binds `127.0.0.1`, so it's
+   local-only. Don't expose it: the page is unauthenticated and shows business data.
