@@ -29,3 +29,9 @@ pythonnet
 # Step 6 — wake word (openWakeWord + onnxruntime for the ONNX inference path).
 openwakeword
 onnxruntime
+
+# Dashboard — the read-only mission-control page (dashboard/app.py) served on
+# localhost:8000. Only these two are needed; the page is plain server-rendered
+# HTML with no front-end framework.
+fastapi
+uvicorn
