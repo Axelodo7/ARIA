@@ -12,6 +12,7 @@ model doing math, and execution is gated in integrations/ads_platform.py.
 """
 import re
 import time
+from datetime import datetime, timezone
 
 import config
 from agents.base_agent import BaseAgent, load_agent_prompt, strip_reasoning
@@ -21,6 +22,18 @@ from memory import store
 # Parses an (action, creative_id) pair back out of a stored proposal summary,
 # e.g. "Proposed pause cr_B" -> ("pause", "cr_B").
 _PROPOSAL_SUMMARY_RE = re.compile(r"Proposed (scale|pause) (cr_\w+)", re.IGNORECASE)
+
+
+def _age_days(ts_iso, now):
+    """Age of an ISO timestamp in days. Unparseable -> 0 (treat as brand new, i.e.
+    never re-surface on a bad timestamp)."""
+    try:
+        t = datetime.fromisoformat(ts_iso)
+    except (TypeError, ValueError):
+        return 0.0
+    if t.tzinfo is None:
+        t = t.replace(tzinfo=timezone.utc)
+    return (now - t).total_seconds() / 86400.0
 
 # Classification thresholds (percent change of last-7 vs prior-7 average).
 _WIN_ROAS = 10      # ROAS up >= this AND ...
@@ -142,45 +155,90 @@ class Bobby(BaseAgent):
 
         report = strip_reasoning(self.run_turn(_build_report_task(analyses, total_recent_spend)))
 
-        # Principle 1: the "don't re-propose something recently rejected" rule is a
-        # right answer, so enforce it in CODE, not just the prompt. Suppress any
-        # proposal whose (action, creative) the human already rejected — until the
-        # data materially changes (a metric-aware check arrives with Stage 2). Note
-        # it in the report so the narrative stays coherent with what's filed.
-        rejected = self._recently_rejected()
-        suppressed = [a for a in analyses
-                      if a["action"] in ("scale", "pause")
-                      and (a["action"], a["creative_id"]) in rejected]
-        if suppressed:
-            note = "; ".join(f"{a['action']} {a['creative_id']}" for a in suppressed)
-            report += ("\n\n_Holding off on re-proposing " + note + " — previously "
-                       "rejected and the data hasn't materially changed._")
+        # Principle 1: "don't re-raise something already settled or already in the
+        # queue" is a right answer, so it's enforced in CODE, not left to the
+        # prompt. Note the skips in the report so the narrative matches what's
+        # actually filed.
+        decisions = self._proposal_decisions(analyses)
+        skipped = [(a, decisions[(a["action"], a["creative_id"])][0])
+                   for a in analyses
+                   if (a["action"], a["creative_id"]) in decisions
+                   and decisions[(a["action"], a["creative_id"])][0].startswith("skip")]
+        if skipped:
+            rej = "; ".join(f"{a['action']} {a['creative_id']}"
+                            for a, why in skipped if why == "skip_rejected")
+            pend = "; ".join(f"{a['action']} {a['creative_id']}"
+                             for a, why in skipped if why == "skip_pending")
+            if rej:
+                report += (f"\n\n_Holding off on re-proposing {rej} — previously "
+                           "rejected and the data hasn't materially changed._")
+            if pend:
+                report += (f"\n\n_Not re-filing {pend} — already awaiting your "
+                           "decision in #approvals._")
         self.post(report)
 
-        proposals = self._file_proposals(analyses, rejected)
+        proposals = self._file_proposals(analyses, decisions)
         return {"report": report, "proposals": proposals, "analyses": analyses}
 
-    def _recently_rejected(self, limit=20):
-        """(action, creative_id) pairs this agent proposed and had REJECTED
-        recently, parsed deterministically from memory summaries."""
-        out = set()
-        for m in store.get_recent_memories(self.name, limit=limit):
-            if m.get("event_type") == "proposal_rejected":
-                mm = _PROPOSAL_SUMMARY_RE.match(m.get("summary") or "")
-                if mm:
-                    out.add((mm.group(1).lower(), mm.group(2)))
+    def _already_open(self, limit=40):
+        """(action, creative_id) -> (event_type, timestamp) for the LATEST memory
+        row about that proposal. 'Open' means the human hasn't acted on it:
+        proposal_filed is still sitting in #approvals, proposal_rejected is a no.
+        An approved proposal is settled and leaves no entry here, so a later
+        proposal for the same creative is free to file."""
+        out = {}
+        for m in store.get_recent_memories(self.name, limit=limit):   # newest first
+            mm = _PROPOSAL_SUMMARY_RE.match(m.get("summary") or "")
+            if not mm:
+                continue
+            key = (mm.group(1).lower(), mm.group(2))
+            if key in out:
+                continue                       # newest wins; older rows are history
+            event = m.get("event_type")
+            if event in ("proposal_filed", "proposal_rejected"):
+                out[key] = (event, m.get("timestamp"))
+            else:
+                out[key] = (None, None)        # e.g. approved -> settled, may re-file
+        return {k: v for k, v in out.items() if v[0]}
+
+    def _proposal_decisions(self, analyses, now=None):
+        """What to do with each actionable analysis, decided deterministically:
+            file          — nothing open for it
+            skip_rejected — the human said no; never nag
+            skip_pending  — an identical proposal is already awaiting a decision
+            resurface     — pending and un-actioned past STALE_PROPOSAL_DAYS, so
+                            raise it ONCE more, flagged, then go quiet again
+        """
+        now = now or datetime.now(timezone.utc)
+        open_map = self._already_open()
+        out = {}
+        for a in analyses:
+            if a["action"] not in ("scale", "pause"):
+                continue                       # flat -> hold, never proposed
+            key = (a["action"], a["creative_id"])
+            event, ts = open_map.get(key, (None, None))
+            if event == "proposal_rejected":
+                out[key] = ("skip_rejected", ts)
+            elif event == "proposal_filed":
+                stale = _age_days(ts, now) >= config.STALE_PROPOSAL_DAYS
+                out[key] = ("resurface" if stale else "skip_pending", ts)
+            else:
+                out[key] = ("file", None)
         return out
 
-    def _file_proposals(self, analyses, rejected=None):
+    def _file_proposals(self, analyses, decisions=None):
         """File one approval request per money action, each with a distinct id.
-        Skips any (action, creative) in `rejected` — a proposal the human already
-        declined, not re-filed until the data materially changes."""
-        rejected = rejected or set()
+        Honours _proposal_decisions: a rejected action is never re-filed, and one
+        already awaiting a decision isn't re-filed either — unless it has gone
+        stale, in which case it's raised once more with a note saying so."""
+        if decisions is None:
+            decisions = self._proposal_decisions(analyses)
         run_stamp = int(time.time())
         proposals = []
         for a in analyses:
-            if a["action"] in ("scale", "pause") and (a["action"], a["creative_id"]) in rejected:
-                continue  # recently rejected + data unchanged -> don't re-file
+            verdict, since = decisions.get((a["action"], a["creative_id"]), ("file", None))
+            if verdict.startswith("skip"):
+                continue
             if a["action"] == "scale":
                 payload_id = f"bobby-scale-{a['creative_id']}-{run_stamp}"
                 desc = (
@@ -204,6 +262,14 @@ class Bobby(BaseAgent):
             else:
                 continue  # flat -> hold, no proposal
 
+            if verdict == "resurface":
+                # Un-actioned past the stale window: raise it once more, clearly
+                # flagged, so a forgotten proposal can't vanish. Filing resets the
+                # clock, so it goes quiet again for another window.
+                since_date = (since or "")[:10]
+                desc += (f"\n:hourglass: STILL PENDING since {since_date} — no "
+                         f"decision yet, re-surfacing once.")
+
             ts = slack_bus.request_approval("Bobby", desc, payload_id)
             # Stage 1 memory: record the filed proposal with a deterministic
             # (Python-written) summary, linked by payload_id for the verdict later.
@@ -215,6 +281,6 @@ class Bobby(BaseAgent):
             proposals.append({
                 "payload_id": payload_id, "action": a["action"],
                 "creative_id": a["creative_id"], "delta": a["delta"],
-                "ts": ts, "description": desc,
+                "ts": ts, "description": desc, "resurfaced": verdict == "resurface",
             })
         return proposals
