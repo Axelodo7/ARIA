@@ -87,6 +87,17 @@ def main():
 
     aria = Aria()
 
+    # NOTE ON SCOPE — read before trusting a green run.
+    # This asserts the ROUTER and the TOOL surface: with clean memory, a pricing
+    # question must reach the freeform path and answer from docs/user.md.
+    # It does NOT and CANNOT assert immunity to a POISONED memory. Measured: once a
+    # bad "pricing -> approvals list" exchange is stored, gemma3 reproduces it 3/3
+    # from context with no tool call at all, and an explicit "never reuse a previous
+    # answer" instruction does not help (also 3/3). In-context examples beat
+    # instructions on this model. The remedy is data, not code:
+    # scripts/prune_conversation.py. Seeding the poison here would just assert a
+    # permanent failure, so this test deliberately stops at the router.
+
     # --- pure matcher checks (no model) --------------------------------------
     print("\n--- the approvals matcher is narrow (deterministic) ---")
     m1 = chk("business questions do NOT match the approvals intent",
