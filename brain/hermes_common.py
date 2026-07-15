@@ -12,25 +12,57 @@ import config
 
 OLLAMA_URL = "http://localhost:11434/api/chat"
 
-# Phase 2: cap any Slack channel / tool result that feeds a prompt so no single
-# prompt can approach the context window. ~2000 tokens ≈ ~8000 chars.
-CONTEXT_TOKEN_CAP = 2000
-_CHARS_PER_TOKEN = 4
+# Cap any Slack channel / tool result that feeds a prompt so no single prompt can
+# approach the context window. MEASURED: at 2000, Sarah's fallback run_turn prompt
+# (business ctx + persona + agent memory + tools + feedback, all at cap) hit 5505
+# — inside num_ctx but with only ~640 tokens left to generate a digest. 1300 puts
+# every path under 5000 with real headroom, and still admits ~10 feedback messages
+# per cycle (she runs every 2h, so that is ample for real volume).
+CONTEXT_TOKEN_CAP = 1300
+
+# --- Token estimation (MEASURED, not assumed) --------------------------------
+# A flat chars/token ratio is unsafe here because content density varies wildly.
+# Measured against gemma3's real tokenizer:
+#     number-dense Slack reports ("CPA $19.72 -> $14.33 (-27%)")  ~2.3 chars/token
+#     plain prose (user feedback)                                 ~4.8 chars/token
+# The old len//4 therefore UNDER-counted dense #ads content by 43% — so the cap
+# meant to prevent truncation was itself letting oversized prompts through, and
+# llama.cpp silently dropped half the window (prompt_eval_count collapsing to
+# ~num_ctx/2). Even 2.5 chars/token still under-counts dense content by 9%.
+# Counting BPE-shaped units (words + punctuation) and adding a margin
+# over-estimates slightly on BOTH prose and dense text — the safe direction for a
+# guard whose entire job is to keep prompts inside the window.
+_TOKEN_UNIT_RE = re.compile(r"\w+|[^\w\s]")
+_UNIT_TO_TOKEN = 1.3
+
+
+def estimate_tokens(text):
+    """Conservative token estimate: never under-counts in practice (measured
+    ~+16% on dense text, ~+28% on prose vs gemma3's real tokenizer)."""
+    if not text:
+        return 0
+    return int(len(_TOKEN_UNIT_RE.findall(text)) * _UNIT_TO_TOKEN)
 
 
 def cap_context(text, max_tokens=CONTEXT_TOKEN_CAP):
-    """Truncate `text` to ~max_tokens (keeping the HEAD — for newest-first channel
-    dumps that keeps the newest content). Cuts on a line boundary and appends a
-    marker. Callers whose content is oldest-first (e.g. Sarah's feedback) should
-    select by recency BEFORE joining rather than relying on this."""
-    if not text:
+    """Truncate `text` to at most ~max_tokens, keeping the HEAD (for newest-first
+    channel dumps that keeps the newest content). Trims whole lines using the
+    measured token estimate above — not a char guess. Callers whose content is
+    oldest-first (e.g. Sarah's feedback) should select by recency BEFORE joining."""
+    if not text or estimate_tokens(text) <= max_tokens:
         return text
-    max_chars = max_tokens * _CHARS_PER_TOKEN
-    if len(text) <= max_chars:
-        return text
-    head = text[:max_chars]
-    cut = head.rsplit("\n", 1)[0] if "\n" in head else head
-    return cut.rstrip() + "\n… [truncated to fit context window]"
+    marker = "\n… [truncated to fit context window]"
+    budget = max_tokens - estimate_tokens(marker)
+    kept, total = [], 0
+    for line in text.splitlines():
+        cost = estimate_tokens(line) + 1        # +1 for the newline
+        if kept and total + cost > budget:
+            break
+        kept.append(line)
+        total += cost
+    if not kept:                                 # one giant line — hard-cut it
+        return text[: max(1, budget * 2)].rstrip() + marker
+    return "\n".join(kept).rstrip() + marker
 
 # Shared business context — read ONCE from docs/user.md and cached. Prepended to
 # every agent's + ARIA's system prompt so they all reason with the same knowledge
@@ -72,13 +104,13 @@ def load_business_memory(path=None, max_tokens=BUSINESS_MEMORY_MAX_TOKENS):
     facts = [ln.rstrip() for ln in text.splitlines() if ln.strip().startswith("- ")]
     if not facts:
         return ""
-    max_chars = max_tokens * _CHARS_PER_TOKEN
     kept, total = [], 0
     for ln in reversed(facts):  # append order is chronological -> reverse = newest first
-        if kept and total + len(ln) + 1 > max_chars:
+        cost = estimate_tokens(ln) + 1          # +1 for the newline
+        if kept and total + cost > max_tokens:
             break
         kept.append(ln)
-        total += len(ln) + 1
+        total += cost
     return "\n".join(kept)
 
 

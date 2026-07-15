@@ -442,9 +442,13 @@ class ConversationSession:
                     continue  # bare @-mentions
                 texts.append(t)
             if texts:
-                # Phase 2: cap the channel dump at ~2000 tokens (keeps newest,
-                # since texts are newest-first) so context can't fill the window.
-                activity = cap_context("\n\n".join(texts))
+                # Cap the channel dump (keeps newest, since texts are newest-first).
+                # Conversation mode uses its OWN tighter cap: measured, the shared
+                # 2000-token cap pushed this prompt past num_ctx and it silently
+                # truncated. Only bounds conversational grounding — the scheduled
+                # cycles read live stats and are unaffected.
+                activity = cap_context("\n\n".join(texts),
+                                       max_tokens=config.CONVERSATION_CONTEXT_TOKEN_CAP)
                 parts.append("Recent activity in your work channel (newest first):\n\n"
                              + activity)
             if self.topic:

@@ -199,51 +199,40 @@ def load_aria_prompt():
 
 TOOLS = [
     {"name": "dispatch_to_agent",
-     "description": ("Hand a task to a teammate who then DOES something: Sarah "
-                     "(customer support), Tom (developer), Ava (content), Bobby "
-                     "(ads). Posts the task to their channel and triggers their "
-                     "work cycle. Use when the user asks you to have a teammate "
-                     "act. For a status question about what a teammate already "
-                     "found, use read_channel instead."),
+     "description": ("Hand a task to a teammate to DO. For status of what they "
+                     "already found, use read_channel."),
      "parameters": {"type": "object", "properties": {
          "agent_name": {"type": "string", "enum": ["Sarah", "Tom", "Ava", "Bobby"]},
-         "task": {"type": "string", "description": "What you're asking them to do."}},
+         "task": {"type": "string", "description": "What to ask them to do."}},
          "required": ["agent_name", "task"]}},
     {"name": "read_channel",
-     "description": ("Read recent messages from a team Slack channel to answer "
-                     "status questions. Channels: feedback, support-intel, dev, "
-                     "content, ads, approvals."),
+     "description": ("Read a team Slack channel to answer status questions: "
+                     "feedback, support-intel, dev, content, ads, approvals."),
      "parameters": {"type": "object", "properties": {
          "channel_name": {"type": "string"},
-         "limit": {"type": "integer", "description": "Recent messages to read (default 10)."}},
+         "limit": {"type": "integer", "description": "Messages to read (default 10)."}},
          "required": ["channel_name"]}},
     {"name": "check_pending_approvals",
-     "description": "List items in #approvals still awaiting the user's decision (pending only).",
+     "description": "List #approvals items still awaiting the user's decision.",
      "parameters": {"type": "object", "properties": {}}},
     {"name": "remember",
-     "description": ("Save a durable fact about the business (ZentraIQ) that the "
-                     "whole team should know going forward — a milestone, a "
-                     "launched feature, a policy change. Use when the user tells "
-                     "you to remember or note something. Python timestamps and "
-                     "stores it; you provide only the fact text."),
+     "description": ("Save a durable business fact the team should know (milestone, "
+                     "launch, policy change). Use when told to remember/note it."),
      "parameters": {"type": "object", "properties": {
-         "fact": {"type": "string", "description": "The fact to remember, one short sentence."}},
+         "fact": {"type": "string", "description": "The fact, one short sentence."}},
          "required": ["fact"]}},
     {"name": "update_hud_state",
-     "description": ("Set the on-screen HUD state: idle, listening, thinking, or "
-                     "speaking. Silent side-effect — never mention it aloud."),
+     "description": "Set the HUD state. Silent side-effect — never say it aloud.",
      "parameters": {"type": "object", "properties": {
          "state": {"type": "string", "enum": ["idle", "listening", "thinking", "speaking"]}},
          "required": ["state"]}},
     {"name": "deep_summarize",
-     "description": ("Summarize long or complex content using the deeper "
-                     "reasoning model — a whole channel's recent messages or a "
-                     "block of text — when a quick skim isn't enough. Slower; "
-                     "use only when depth or accuracy really matters."),
+     "description": ("Summarize a channel or text with the deeper model when a skim "
+                     "isn't enough. Slower — only when accuracy really matters."),
      "parameters": {"type": "object", "properties": {
          "channel_or_text": {"type": "string", "description":
              "A channel name (feedback, support-intel, dev, content, ads, "
-             "approvals) to read and summarize, or text to summarize directly."}},
+             "approvals), or text to summarize."}},
          "required": ["channel_or_text"]}},
 ]
 

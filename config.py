@@ -172,6 +172,15 @@ AGENT_MODELS = {
 # (fixed overhead ~2900 + the ~2000-token context cap = ~4900, well under 6144).
 NUM_CTX = int(_get_float("NUM_CTX", 6144))
 
+# Conversation mode carries the most baggage of any prompt: business context +
+# business memory + persona + the live-voice rules + the agent's work-channel
+# history. MEASURED: at the shared 2000-token cap that prompt exceeded num_ctx and
+# was silently truncated (prompt_eval_count collapsing to ~num_ctx/2), so the
+# work-channel context gets its own, tighter cap. Bobby-at-cap then lands ~4.4k
+# with ~1.4k of real headroom. This only bounds an agent's CONVERSATIONAL
+# grounding — the scheduled cycles read live stats and are unaffected.
+CONVERSATION_CONTEXT_TOKEN_CAP = int(_get_float("CONVERSATION_CONTEXT_TOKEN_CAP", 1200))
+
 # Conversation mode (Step 7A) uses a FAST LOCAL model for live back-and-forth
 # chat — NOT each agent's heavier scheduled-cycle model (deepseek-r1:14b stays).
 # CONVERSATION_SPEED_MODEL is the single knob for the speed/accuracy trade: swap

@@ -29,11 +29,10 @@ from pathlib import Path
 import config
 from agents.base_agent import BaseAgent, load_agent_prompt, strip_reasoning
 from brain.hermes_common import (CONTEXT_TOKEN_CAP, call_hermes, _first_json_object,
-                                 business_context_block)
+                                 business_context_block, estimate_tokens)
 from integrations import slack_bus
 from memory import store
 
-_CHARS_PER_TOKEN = 4
 _QUOTE_MAX_CHARS = 140
 
 # Sections a cluster can land in, mapped to the digest's section headers. URGENT
@@ -57,12 +56,12 @@ def _short_quote(text):
 def _cap_by_recency(fresh, max_tokens):
     """Keep the most recent messages from an oldest->newest list whose combined
     text stays within ~max_tokens, then return them still oldest->newest. At least
-    one message is always kept."""
-    max_chars = max_tokens * _CHARS_PER_TOKEN
+    one message is always kept. Uses the MEASURED token estimate — a flat
+    chars/token guess under-counts dense text and lets the prompt overrun."""
     kept, total = [], 0
     for m in reversed(fresh):  # newest first
-        total += len(m.get("text") or "") + 3  # +3 ≈ the "- " bullet + newline
-        if total > max_chars and kept:
+        total += estimate_tokens(m.get("text") or "") + 2   # +2 ≈ "- " bullet + newline
+        if total > max_tokens and kept:
             break
         kept.append(m)
     return list(reversed(kept))  # back to oldest->newest

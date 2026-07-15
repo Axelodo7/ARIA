@@ -11,7 +11,7 @@ from pathlib import Path
 
 import config
 from brain.hermes_common import (call_hermes, parse_tool_call, tools_block,
-                                 business_context_block)
+                                 business_context_block, estimate_tokens)
 from integrations import slack_bus
 from integrations.slack_bus import post_as
 from memory import store
@@ -66,7 +66,6 @@ def strip_reasoning(text):
 # HISTORY_MAX_TOKENS so it can't eat the context window (num_ctx 6144, existing
 # prompt already sizeable) and reintroduce truncation.
 HISTORY_MAX_TOKENS = 600
-_CHARS_PER_TOKEN = 4
 
 _HISTORY_RULE = (
     "Do not re-propose something that was recently rejected unless the underlying "
@@ -100,15 +99,17 @@ def format_recent_history(memories, max_tokens=HISTORY_MAX_TOKENS):
     the most recent entries that fit. Empty memories -> '' (no block emitted)."""
     if not memories:
         return ""
-    budget = (max_tokens * _CHARS_PER_TOKEN
-              - len(_HISTORY_OPEN) - len(_HISTORY_HEADER) - len(_HISTORY_CLOSE))
+    # Budget in MEASURED tokens — a flat chars/token guess under-counts dense
+    # lines (dates, ids, dollar deltas) and lets the prompt overrun the window.
+    budget = max_tokens - estimate_tokens(_HISTORY_OPEN + _HISTORY_HEADER + _HISTORY_CLOSE)
     lines, total = [], 0
     for m in memories:  # newest first; keep the most recent that fit
         line = _memory_line(m) + "\n"
-        if lines and total + len(line) > budget:
+        cost = estimate_tokens(line)
+        if lines and total + cost > budget:
             break
         lines.append(line)
-        total += len(line)
+        total += cost
     return _HISTORY_OPEN + _HISTORY_HEADER + "".join(lines) + _HISTORY_CLOSE
 
 
