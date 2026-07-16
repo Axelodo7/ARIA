@@ -15,6 +15,11 @@ renders/
 # --- Daemon logs ------------------------------------------------------------
 logs/
 
+# --- Downloaded binaries ----------------------------------------------------
+# NSSM (the service manager) — a downloaded exe, not our source. Fetched per
+# machine; never committed.
+tools/
+
 # --- Remotion video project (Node) ------------------------------------------
 video/node_modules/
 video/out/
