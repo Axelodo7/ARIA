@@ -198,6 +198,59 @@ def _parse_approvals_query(text):
     return any(rx.search(text or "") for rx in _APPROVALS_RES)
 
 
+# A request for a capability ARIA does NOT have — the open web, the internet,
+# browser tabs, web search. She must decline at the boundary, not reach for the
+# nearest tool. MEASURED: "pull up the air quality index in New Jersey in a separate
+# tab" made the model call read_channel and read back an unrelated message 4/4 (it
+# grabs whatever tool it has when it can't do what was asked — same class as the
+# pricing->remember misfire). Handled deterministically so the model never gets the
+# chance (Principle 1). Matches the CAPABILITY words (browser/tab/internet/search/
+# URL), never topic words, so "what's our pricing" is untouched.
+_WEB_REQUEST_RES = [
+    re.compile(r"\bbrowsers?\b", re.IGNORECASE),
+    re.compile(r"\b(?:new|separate|another)\s+tab\b", re.IGNORECASE),
+    re.compile(r"\b(?:open|pull\s+up|bring\s+up|in)\b.{0,25}\btab\b", re.IGNORECASE),
+    re.compile(r"https?://|\bwww\.", re.IGNORECASE),
+    re.compile(r"\b[a-z0-9][a-z0-9-]*\.(?:com|org|net|io|gov|edu|co|ai)\b", re.IGNORECASE),
+    re.compile(r"\bweb\s*search\b|\bsearch\s+(?:the\s+)?(?:web|internet|online)\b",
+               re.IGNORECASE),
+    re.compile(r"\bsearch\b.{0,30}\bonline\b", re.IGNORECASE),
+    re.compile(r"\b(?:on|from|off)\s+the\s+(?:web|internet)\b|\bthe\s+internet\b",
+               re.IGNORECASE),
+    re.compile(r"\bgoogle\b|\bbing\b|\bduck\s*duck\s*go\b", re.IGNORECASE),
+    re.compile(r"\bbrowse\b|\bweb\s*page\b|\bweb\s*site\b", re.IGNORECASE),
+    re.compile(r"\blook\b.{0,20}\bup\b.{0,30}\b(?:online|web|internet)\b", re.IGNORECASE),
+]
+
+_CAPABILITY_DECLINE = (
+    "I don't have web access, sir — I can't open browser tabs or search the "
+    "internet. I can only work with the team and our own Slack channels.")
+
+
+def _parse_web_request(text):
+    """True if `text` asks for a web/browser/internet capability ARIA lacks."""
+    return any(rx.search(text or "") for rx in _WEB_REQUEST_RES)
+
+
+# The ONLY context in which the model may run read_channel: text that plausibly
+# refers to a team channel or a teammate's posts. Every legitimate channel/status
+# query is already handled deterministically above (_parse_channel_query /
+# _parse_status_query), so a model read_channel call on text with none of these is
+# spurious — the model dumping a random channel on a request it can't fulfil. This
+# is the general backstop behind the web-request decline (a non-web off-topic
+# question, e.g. "what's the capital of France", still must not dump a channel).
+_CHANNEL_INTENT_RE = re.compile(
+    r"#|\b(?:channel|slack|feedback|support|dev|content|ads|approvals?|ops|"
+    r"sarah|bobby|ava|tom|teammate|"
+    r"post(?:ed|s|ing)?|message|thread|digest|dropped|wrote)\b", re.IGNORECASE)
+
+
+def _has_channel_intent(text):
+    """True if `text` plausibly refers to a team channel or teammate's posts — the
+    precondition for a model-driven read_channel."""
+    return bool(_CHANNEL_INTENT_RE.search(text or ""))
+
+
 def _parse_status_query(text):
     """Return the agent name for an explicit 'what did X find'-style query."""
     for rx in _STATUS_RES:
@@ -354,8 +407,19 @@ def _tool_vetoed(name, user_text):
     write. Ever. (In practice that veto is absolute — an utterance that does match
     is handled deterministically at the top of think() and never reaches the model
     — which is precisely the point: the model cannot reach this write path at all.)
+
+    `read_channel` is vetoed the same way: the model may only read a channel when the
+    user's text actually refers to a channel or a teammate's posts. MEASURED: a web
+    request ("pull up the air quality index ... in a tab") with no channel reference
+    made the model call read_channel and dump a random message 4/4. Genuine channel
+    queries are handled deterministically before the model, so a model read_channel
+    on channel-less text is always the model grabbing the nearest tool.
     """
-    return name == "remember" and not _parse_remember(user_text)
+    if name == "remember":
+        return not _parse_remember(user_text)
+    if name == "read_channel":
+        return not _has_channel_intent(user_text)
+    return False
 
 
 class Aria:
@@ -411,6 +475,14 @@ class Aria:
                     "tool_calls": [{"name": "dispatch_to_agent",
                                     "arguments": {"agent_name": agent.capitalize(), "task": task}}],
                     "dispatched": True}
+
+        # Capability boundary — a web/browser/internet request is something ARIA
+        # cannot do. Decline deterministically BEFORE the model, so it can never
+        # answer by dumping a random channel instead (measured 4/4). Checked ahead of
+        # the channel/status routes so "open #ads in a new tab" declines rather than
+        # reading the channel — she still can't open a tab.
+        if _parse_web_request(user_text):
+            return {"reply": _CAPABILITY_DECLINE, "tool_calls": [], "dispatched": False}
 
         # Deterministic status query ("what did Bobby find") — read that agent's
         # channel directly, no model call, so it can never fabricate.
