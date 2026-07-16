@@ -43,10 +43,20 @@ _AGENT_CHANNELS = {"sarah": "feedback", "tom": "dev", "ava": "support_intel", "b
 # verbatim rather than letting the fast model rephrase (and possibly fabricate).
 _STRUCTURED_RELAY = {"check_pending_approvals", "read_channel", "remember"}
 
-# A tool call needs room to finish. The fast path caps replies at 64 tokens, which
-# truncates one mid-JSON — that is exactly how raw <tool_call> text reached the
-# speaker (Bug A). One retry at this budget, then the strip is the backstop.
-_TOOL_CALL_NUM_PREDICT = 220
+# How much room ARIA gets to finish a spoken answer. MEASURED with done_reason: a
+# full pricing readout completes naturally at 152 tokens, every time. The old cap
+# of 64 guillotined it mid-word ("...investor-ready demos or") — done_reason came
+# back "length", not "stop". Brevity is the PROMPT's job, not this number's: told
+# to keep to "one to three sentences at most", a greeting still comes back at 13
+# tokens with NO cap at all. So this is a runaway ceiling only. 256 leaves ~70%
+# headroom over the longest answer measured and truncated 0/10 on every question
+# tried; 192 was already clean.
+_FREEFORM_NUM_PREDICT = 256
+
+# A tool call must have room to finish: truncated mid-JSON it parses as nothing and
+# the raw syntax would be spoken (Bug A). Deliberately ABOVE _FREEFORM_NUM_PREDICT —
+# a retry needs more room than the cap that just cut it off, or it's not a retry.
+_TOOL_CALL_NUM_PREDICT = 384
 
 # Used when a tool call is refused, alongside dropping the tools block entirely.
 # Deliberately POSITIVE and silent about tool syntax: an earlier draft said "never
@@ -438,8 +448,9 @@ class Aria:
                     "tool_calls": [], "dispatched": False}
 
         model = self.reasoning_model if reasoning else self.model
-        # Fix #2 — hard brevity cap on the fast path; keep the model warm.
-        num_predict = None if reasoning else 64
+        # Runaway ceiling on the fast path (NOT the brevity control — the prompt is);
+        # keep the model warm. See _FREEFORM_NUM_PREDICT for the measurement.
+        num_predict = None if reasoning else _FREEFORM_NUM_PREDICT
         keep_alive = None if reasoning else "30m"
 
         # Order matters, and it is load-bearing. Conversation memory goes AFTER the

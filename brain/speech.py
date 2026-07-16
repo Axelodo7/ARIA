@@ -44,12 +44,23 @@ _SNAKE_RE = re.compile(r"\b([A-Za-z0-9]+(?:_[A-Za-z0-9]+)+)\b")
 # silently promotes an estimate to an exact figure, so it becomes a word.
 _APPROX_RE = re.compile(r"~(?=[\d$£€])")
 
+# Markdown link — the label is the speakable part, the URL never is. gemma3 writes
+# markdown even when nobody asked it to, so this is ARIA's own output too.
+_MD_LINK_RE = re.compile(r"\[([^\]]*)\]\([^)]*\)")
+
 _FENCE_RE = re.compile(r"```+")
+# A horizontal rule separates sections on screen and says NOTHING aloud. Bobby's
+# #ads posts are full of "---", and ARIA relays that channel verbatim.
+_HRULE_RE = re.compile(r"^[ \t]*(?:[-*_=]\s*){3,}$", re.MULTILINE)
+# List bullets: "- ", "* ", "•", "+ ", "1. ", "2) ". The trailing \s+ is what keeps
+# this from eating a hyphenated word or a negative number.
 _BULLET_RE = re.compile(r"^[ \t]*(?:[-*•+]|\d+[.)])\s+", re.MULTILINE)
 _QUOTE_RE = re.compile(r"^[ \t]*>+\s*", re.MULTILINE)
 _HEADER_RE = re.compile(r"^[ \t]*#{1,6}\s+", re.MULTILINE)
-# Whatever formatting survives the rules above is decoration with no spoken form.
-_FORMAT_CHARS_RE = re.compile(r"[*_~`]+")
+# Whatever formatting survives the rules above is decoration with no spoken form:
+# **bold**, *italic*, __underline__, `code`, ~strike~, and a bare '#' (so "#ads"
+# speaks as "ads", and a header written without a space still loses its hashes).
+_FORMAT_CHARS_RE = re.compile(r"[*_~`#]+")
 
 
 def _join_lines(text):
@@ -77,13 +88,15 @@ def clean_for_speech(text):
         return ""
     t = strip_tool_syntax(text)                 # machine syntax never reaches the ear
     t = _FENCE_RE.sub(" ", t)
-    t = _LINK_LABEL_RE.sub(r"\1", t)
+    t = _MD_LINK_RE.sub(r"\1", t)               # [label](url) -> label
+    t = _LINK_LABEL_RE.sub(r"\1", t)            # <url|label>  -> label
     t = _BARE_LINK_RE.sub(" ", t)
     t = _MENTION_RE.sub(" ", t)
     t = _EMOJI_RE.sub(" ", t)                   # before snake_case: :white_check_mark:
     t = _APPROX_RE.sub("about ", t)             # before the tilde is stripped as markup
     t = _CREATIVE_RE.sub(r"creative \1", t)     # before the generic snake_case rule
     t = _SNAKE_RE.sub(lambda m: m.group(1).replace("_", " "), t)
+    t = _HRULE_RE.sub("", t)                    # before bullets — "---" is not a list
     t = _BULLET_RE.sub("", t)
     t = _QUOTE_RE.sub("", t)
     t = _HEADER_RE.sub("", t)

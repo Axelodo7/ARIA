@@ -53,7 +53,7 @@ TMP_MEM = os.path.join(tempfile.gettempdir(), f"test_speech_mem_{os.getpid()}.md
 HC.BUSINESS_MEMORY_PATH = TMP_MEM
 
 from brain.speech import (clean_for_speech, speakable, EMPTY_REPLY_FALLBACK,
-                          _EMOJI_RE)
+                          _EMOJI_RE, _BULLET_RE)
 from brain.hermes_common import strip_tool_syntax, looks_like_tool_syntax, OLLAMA_URL
 from brain.aria_agent import Aria, _parse_remember, _tool_vetoed
 
@@ -269,8 +269,58 @@ def main():
                  not os.path.exists(TMP_MEM) or not open(TMP_MEM, encoding="utf-8").read().strip())
         m3 = m3 and m4
 
+    # --- 8) the full pricing answer: complete, and clean at the TTS input ----
+    print(f"\n--- 8) 'give me all the pricing tiers' x{REPEATS} — the real answer ---")
+    g1 = g2 = g3 = True
+    if m1 is None:
+        print("  [skip] needs Ollama.")
+        g1 = g2 = g3 = None
+    else:
+        cut, dirty, missing = [], [], []
+        for _ in range(REPEATS):
+            reply = aria.think("give me all the pricing tiers")["reply"]
+            sent = capture_tts(reply)           # exactly what ElevenLabs receives
+            # Truncation shows up as a reply that just stops — no terminal
+            # punctuation. That is what "…investor-ready demos or" looked like.
+            if not sent.rstrip().endswith((".", "!", "?", '"', "”")):
+                cut.append(sent[-60:])
+            if any(ch in sent for ch in "*_#`~") or _BULLET_RE.search(sent):
+                dirty.append(sent[:70])
+            # All four price points present = the list actually finished.
+            if not all(p in sent.replace(",", "") for p in ("8", "15", "23", "225")):
+                missing.append(sent[:70])
+        print(f"  TTS input : {sent}")
+        for s in cut:
+            print(f"    TRUNCATED: …{s}")
+        for s in dirty:
+            print(f"    MARKDOWN LEAKED: {s}")
+        g1 = chk(f"the pricing answer completes — no mid-sentence cut ({REPEATS} runs)",
+                 not cut)
+        g2 = chk("zero *, _, #, `, ~ or list bullets reach the TTS input", not dirty)
+        g3 = chk("all four tiers survive (8K / 15K / 23K / 225)", not missing)
+
+    # --- 9) markdown shapes gemma3 actually emits ---------------------------
+    print("\n--- 9) markdown the model writes unprompted ---")
+    md = ("## Pricing\n"
+          "*   **Launch — $8K:** first-time founders\n"
+          "- __Scale — $15K:__ funded startups\n"
+          "1. `Flagship — $23K` established teams\n"
+          "---\n"
+          "See [our site](https://zentraiq.com) or #ads.")
+    mdo = clean_for_speech(md)
+    print(f"  {mdo}")
+    k1 = chk("no markdown characters survive at all",
+             not any(ch in mdo for ch in "*_#`") and not _BULLET_RE.search(mdo))
+    k2 = chk("the horizontal rule is gone", "---" not in mdo)
+    k3 = chk("a markdown link speaks its label, not its URL",
+             "our site" in mdo and "https" not in mdo)
+    k4 = chk("'#ads' speaks as 'ads'", "ads" in mdo)
+    k5 = chk("the tiers survive the cleaning",
+             all(t in mdo for t in ("Launch", "Scale", "Flagship", "$8K", "$23K")))
+
     results = [b1, b2, b3, b4, b5, b6, b7, t1, t2, t3, a1, a2, a3, a4, a5, a6,
-               c1, c2, c3, c4, c5, e1, e2, e3, e4, e5, r1, r2, v1, v2, v3, m1, m2, m3]
+               c1, c2, c3, c4, c5, e1, e2, e3, e4, e5, r1, r2, v1, v2, v3, m1, m2, m3,
+               g1, g2, g3, k1, k2, k3, k4, k5]
     all_ok = all(r for r in results if r is not None)
     print("\n" + "=" * 76)
     print("ALL PASS — ARIA speaks prose, never syntax, and never nothing."
