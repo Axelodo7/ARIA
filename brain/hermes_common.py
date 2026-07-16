@@ -92,16 +92,62 @@ def load_business_context(path=BUSINESS_CONTEXT_PATH):
 BUSINESS_MEMORY_PATH = Path(__file__).resolve().parent.parent / "docs" / "memory.md"
 BUSINESS_MEMORY_MAX_TOKENS = 400
 
+# --- Dry-run isolation -------------------------------------------------------
+# The live file, captured before anything can reassign BUSINESS_MEMORY_PATH above.
+# The thing being protected has to be identified by LOCATION, not by "did the
+# caller pass a path?": tests isolate themselves by REASSIGNING that global, so
+# `path is None` says nothing about whether the real file is the target.
+_LIVE_BUSINESS_MEMORY_PATH = BUSINESS_MEMORY_PATH
+
+# Where a dry run's facts go instead — the file analogue of agent_memory's dry_run
+# column. Same contract: the write still happens and still round-trips, it just
+# lands in a namespace that can never be mistaken for, or mutate, real business
+# memory. This is not hypothetical: a misfiring `remember` tool call wrote a
+# fabricated "fact" into the real docs/memory.md during testing, and it had to be
+# pruned out by hand. Gitignored — it is scratch, not history.
+DRY_RUN_MEMORY_PATH = _LIVE_BUSINESS_MEMORY_PATH.with_name("memory.dryrun.md")
+
+
+def _dry_run_overlay(target):
+    """The isolated file a dry run must use INSTEAD of `target`, or None when
+    there is nothing to protect — a real run, or a caller that already aimed the
+    path elsewhere (a test's temp file IS the isolation; redirecting that would
+    only break its read-back)."""
+    if not config.DRY_RUN:
+        return None
+    try:
+        if Path(target).resolve() != _LIVE_BUSINESS_MEMORY_PATH.resolve():
+            return None
+    except OSError:
+        return None
+    return DRY_RUN_MEMORY_PATH
+
+
+def _read_facts(path):
+    """The '- ...' fact lines of `path` in file order (chronological). Only bullet
+    lines are facts; headers, comments and blanks are ignored. Missing -> []."""
+    try:
+        text = Path(path).read_text(encoding="utf-8")
+    except (FileNotFoundError, OSError):
+        return []
+    return [ln.rstrip() for ln in text.splitlines() if ln.strip().startswith("- ")]
+
 
 def load_business_memory(path=None, max_tokens=BUSINESS_MEMORY_MAX_TOKENS):
-    """Return the most recent docs/memory.md fact lines that fit within
-    max_tokens, NEWEST FIRST. Only bullet lines ('- ...') are facts; headers,
-    comments, and blanks are ignored. Missing/empty file -> ''. Read fresh."""
-    try:
-        text = Path(path or BUSINESS_MEMORY_PATH).read_text(encoding="utf-8")
-    except (FileNotFoundError, OSError):
-        return ""
-    facts = [ln.rstrip() for ln in text.splitlines() if ln.strip().startswith("- ")]
+    """Return the most recent business facts that fit within max_tokens, NEWEST
+    FIRST. Missing/empty -> ''. Read fresh (never cached).
+
+    Under DRY_RUN the live file is read READ-ONLY and any dry-run facts are laid
+    over the top (they are newer, so they come first). A dry run therefore sees
+    exactly what production sees, PLUS whatever it remembered itself — which keeps
+    the prompt the same size it will be in production, and those prompt_eval
+    budgets are measured under DRY_RUN. A REAL run never sees a dry-run fact.
+    """
+    target = Path(path or BUSINESS_MEMORY_PATH)
+    facts = _read_facts(target)
+    overlay = _dry_run_overlay(target)
+    if overlay:
+        facts += _read_facts(overlay)       # appended last == newest
     if not facts:
         return ""
     kept, total = [], 0
@@ -115,9 +161,14 @@ def load_business_memory(path=None, max_tokens=BUSINESS_MEMORY_MAX_TOKENS):
 
 
 def append_business_fact(fact, path=None):
-    """Append one timestamped fact line to docs/memory.md and return the line
+    """Append one timestamped fact line to business memory and return the line
     written (or None if `fact` is empty). PYTHON writes the date and formatting;
-    the caller supplies ONLY the fact text — never the timestamp or the file I/O."""
+    the caller supplies ONLY the fact text — never the timestamp or the file I/O.
+
+    A dry run NEVER writes the live docs/memory.md; the write is redirected to
+    DRY_RUN_MEMORY_PATH. Returns the line either way, so a dry run still reports
+    honestly what it recorded — it recorded it, just not into real memory.
+    """
     fact = (fact or "").strip()
     if not fact:
         return None
@@ -125,7 +176,8 @@ def append_business_fact(fact, path=None):
         fact += "."
     date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     line = f"- {date}: {fact}"
-    p = Path(path or BUSINESS_MEMORY_PATH)
+    target = Path(path or BUSINESS_MEMORY_PATH)
+    p = _dry_run_overlay(target) or target
     p.parent.mkdir(parents=True, exist_ok=True)
     existing = p.read_text(encoding="utf-8") if p.exists() else ""
     prefix = "" if (not existing or existing.endswith("\n")) else "\n"

@@ -5,6 +5,9 @@
 *.db
 memory/aria_memory.db
 memory/*.jsonl
+# Business facts written by a DRY_RUN (tests, --once dry cycles). Scratch, not
+# history — the real facts live in docs/memory.md, which a dry run never writes.
+docs/memory.dryrun.md
 
 # --- Rendered content (stub or real MP4s) -----------------------------------
 renders/

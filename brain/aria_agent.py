@@ -48,12 +48,13 @@ _STRUCTURED_RELAY = {"check_pending_approvals", "read_channel", "remember"}
 # speaker (Bug A). One retry at this budget, then the strip is the backstop.
 _TOOL_CALL_NUM_PREDICT = 220
 
-# Appended once when the model invents a tool it was never offered, to get a real
-# spoken answer instead of a dropped turn.
-_PLAIN_TEXT_DIRECTIVE = (
-    "\n\nYOUR PREVIOUS DRAFT CALLED A TOOL THAT DOES NOT EXIST. Do not call any "
-    "tool. Answer the user's question directly, in one or two spoken sentences, "
-    "using the business context above. Never output <tool_call> or JSON."
+# Used when a tool call is refused, alongside dropping the tools block entirely.
+# Deliberately POSITIVE and silent about tool syntax: an earlier draft said "never
+# output <tool_call> or JSON" and the model kept emitting tool calls anyway —
+# naming the thing is priming, which is the same lesson as everywhere else here.
+_ANSWER_DIRECTLY = (
+    "\n\nAnswer the user's question directly, in one or two spoken sentences, "
+    "using the business context above."
 )
 
 
@@ -447,26 +448,42 @@ class Aria:
         # primes the model to emit a tool call — a pricing question misfired to
         # check_pending_approvals 3/3 with that ordering and 0/3 with this one.
         # Recent conversation also belongs closest to the user's message.
-        prompt = (business_context_block()
-                  + (system_prompt or self.system_prompt)
-                  + tools_block(TOOLS)
-                  + conv_memory.conversation_block())
-        messages = [
-            {"role": "system", "content": prompt},
-            {"role": "system", "content": f"Current date and time: {datetime.now():%A %Y-%m-%d %H:%M:%S}."},
-        ]
-        messages += (conversation_history or [])
-        messages.append({"role": "user", "content": user_text})
+        def _build(with_tools=True):
+            prompt = (business_context_block()
+                      + (system_prompt or self.system_prompt)
+                      + (tools_block(TOOLS) if with_tools else "")
+                      + conv_memory.conversation_block())
+            msgs = [
+                {"role": "system", "content": prompt},
+                {"role": "system", "content": f"Current date and time: {datetime.now():%A %Y-%m-%d %H:%M:%S}."},
+            ]
+            msgs += (conversation_history or [])
+            msgs.append({"role": "user", "content": user_text})
+            return msgs
 
-        def _generate(predict=num_predict, extra_system=None):
-            msgs = messages + ([{"role": "system", "content": extra_system}]
-                               if extra_system else [])
-            return strip_reasoning(call_hermes(msgs, model=model,
+        messages = _build()
+
+        def _generate(msgs=None, predict=num_predict, extra_system=None):
+            m = (messages if msgs is None else msgs)
+            m = m + ([{"role": "system", "content": extra_system}] if extra_system else [])
+            return strip_reasoning(call_hermes(m, model=model,
                                                num_predict=predict,
                                                keep_alive=keep_alive))
 
+        def _answer_without_tools():
+            """Last resort for a refused tool call: regenerate with the tools block
+            REMOVED from the prompt, rather than instructing the model not to call
+            one. Instructions lose to what's in the context on this model — proven
+            here repeatedly — so the fix is to take the thing OUT of the context.
+            MEASURED on seeded pricing questions: with no tools block, 0/10 misfired
+            and every answer carried real pricing; every non-empty tool surface
+            leaked. The directive is phrased positively and never names the
+            tool-call syntax, since naming it is itself priming."""
+            return strip_tool_syntax(_generate(
+                _build(with_tools=False), extra_system=_ANSWER_DIRECTLY))
+
         tool_calls, dispatched = [], False
-        recovered = False   # at most ONE recovery regeneration per turn
+        retried_truncation = False
         reply = _generate()
         for _ in range(6):  # bounded tool-call loop
             call = parse_tool_call(reply)
@@ -474,8 +491,8 @@ class Aria:
                 # Bug A: a tool call cut off mid-JSON by num_predict parses as
                 # nothing, so the raw syntax would fall through and be SPOKEN.
                 # Give it room to finish once; the strip below is the backstop.
-                if looks_like_tool_syntax(reply) and not recovered:
-                    recovered = True
+                if looks_like_tool_syntax(reply) and not retried_truncation:
+                    retried_truncation = True
                     reply = _generate(predict=_TOOL_CALL_NUM_PREDICT)
                     continue
                 break
@@ -483,16 +500,12 @@ class Aria:
             if name not in _MODEL_TOOL_NAMES or _tool_vetoed(name, user_text):
                 # Either a tool the model was never offered (it invents them —
                 # `display_pricing`, `get_pricing`), or one Python refuses to run
-                # for this utterance (`remember` on a question — Bug A). Do NOT
-                # execute it, and don't drop the turn either: ask once for a plain
-                # answer, which is what the user actually wanted.
+                # for this utterance (`remember` on a question — Bug A). Don't
+                # execute it, and don't drop the turn either: the user asked a
+                # real question and the answer is already in the business context.
                 print(f"[aria] refused tool call {name!r} "
                       f"(offered={name in _MODEL_TOOL_NAMES})")
-                if not recovered:
-                    recovered = True
-                    reply = _generate(extra_system=_PLAIN_TEXT_DIRECTIVE)
-                    continue
-                reply = ""      # -> EMPTY_REPLY_FALLBACK below
+                reply = _answer_without_tools()
                 break
             tool_calls.append(call)
             if name == "dispatch_to_agent":
