@@ -239,6 +239,45 @@ def parse_tool_call(text):
     return None
 
 
+# --- Tool syntax must never be SPOKEN ----------------------------------------
+# A tool call is machine syntax. MEASURED (Bug A): "give me the pricing tiers"
+# made the model emit <tool_call>{"name": "remember", ...}, num_predict=64 cut it
+# off mid-JSON, parse_tool_call found no closing tag and returned None — so the raw
+# text became the reply and was read aloud until the sentence simply stopped.
+# parse_tool_call is the happy path; these are the backstop. Parse it, or strip it,
+# but never speak it.
+_TOOL_CALL_BLOCK_RE = re.compile(r"<tool_call>.*?</tool_call>", re.DOTALL | re.IGNORECASE)
+_TOOL_CALL_OPEN_RE = re.compile(r"<tool_call>.*$", re.DOTALL | re.IGNORECASE)
+_TOOL_CALL_STRAY_RE = re.compile(r"</?tool_call>", re.IGNORECASE)
+# A bare envelope with no tags — {"name": "remember", "arguments": {...}}
+_TOOL_ENVELOPE_RE = re.compile(r'^\s*\{\s*"(?:name|arguments)"\s*:.*$', re.DOTALL)
+
+
+def looks_like_tool_syntax(text):
+    """True if a reply is TRYING to be a tool call — including a truncated one that
+    parse_tool_call cannot decode. Used to retry with a bigger token budget before
+    the text would otherwise be spoken verbatim."""
+    t = text or ""
+    return bool(_TOOL_CALL_STRAY_RE.search(t) or _TOOL_ENVELOPE_RE.match(t))
+
+
+def strip_tool_syntax(text):
+    """Remove tool-call syntax from a reply bound for the user.
+
+    Handles complete blocks, an UNTERMINATED opener (the truncation case), stray
+    tags, and a bare JSON envelope. Internal newlines are preserved — speech
+    cleaning downstream still needs the line structure.
+    """
+    if not text:
+        return ""
+    t = _TOOL_CALL_BLOCK_RE.sub(" ", text)
+    t = _TOOL_CALL_OPEN_RE.sub(" ", t)      # truncated: no closing tag ever came
+    t = _TOOL_CALL_STRAY_RE.sub(" ", t)
+    if _TOOL_ENVELOPE_RE.match(t):
+        t = ""
+    return t.strip()
+
+
 def tools_block(tools):
     return f"""
 You have access to the following tools. To call one, respond with EXACTLY this

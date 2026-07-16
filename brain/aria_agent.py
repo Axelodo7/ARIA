@@ -27,7 +27,9 @@ import config
 from brain import conv_memory
 from brain.hermes_common import (call_hermes, parse_tool_call, tools_block,
                                  business_context_block, cap_context,
-                                 append_business_fact)
+                                 append_business_fact, strip_tool_syntax,
+                                 looks_like_tool_syntax)
+from brain.speech import EMPTY_REPLY_FALLBACK
 from agents.base_agent import strip_reasoning
 from integrations import slack_bus
 
@@ -40,6 +42,19 @@ _AGENT_CHANNELS = {"sarah": "feedback", "tom": "dev", "ava": "support_intel", "b
 # Tools whose output is STRUCTURED — ARIA speaks a Python-formatted version
 # verbatim rather than letting the fast model rephrase (and possibly fabricate).
 _STRUCTURED_RELAY = {"check_pending_approvals", "read_channel", "remember"}
+
+# A tool call needs room to finish. The fast path caps replies at 64 tokens, which
+# truncates one mid-JSON — that is exactly how raw <tool_call> text reached the
+# speaker (Bug A). One retry at this budget, then the strip is the backstop.
+_TOOL_CALL_NUM_PREDICT = 220
+
+# Appended once when the model invents a tool it was never offered, to get a real
+# spoken answer instead of a dropped turn.
+_PLAIN_TEXT_DIRECTIVE = (
+    "\n\nYOUR PREVIOUS DRAFT CALLED A TOOL THAT DOES NOT EXIST. Do not call any "
+    "tool. Answer the user's question directly, in one or two spoken sentences, "
+    "using the business context above. Never output <tool_call> or JSON."
+)
 
 
 # --- What a structured relay leaves in conversation memory -------------------
@@ -74,14 +89,26 @@ _REMEMBER_RE = re.compile(
     re.IGNORECASE | re.DOTALL)
 
 
+# A QUESTION IS NEVER A FACT. "remember what I said about pricing?" carries the
+# trigger word but is a request to recall, not to store — without this guard it
+# would write "what I said about pricing" into docs/memory.md as though it were
+# true. Same family as Bug A: remember must fire on commands only.
+_QUESTION_START_RE = re.compile(
+    r"^(?:what|when|where|who|whom|whose|why|how|which|is|are|was|were|do|does|"
+    r"did|can|could|should|would|will|has|have|had|am)\b", re.IGNORECASE)
+
+
 def _parse_remember(text):
-    """Return the fact text if `text` is an explicit remember/note command, else
-    None. The fact is everything after the trigger verb."""
+    """Return the fact text if `text` is an explicit remember/note COMMAND, else
+    None. The fact is everything after the trigger verb; interrogatives are
+    rejected outright."""
     m = _REMEMBER_RE.search(text or "")
     if not m:
         return None
     fact = m.group(1).strip().strip("\"'").strip()
-    return fact or None
+    if not fact or _QUESTION_START_RE.match(fact):
+        return None
+    return fact
 
 # Slack system events that are never real content (joins, topic changes, ...).
 # NOTE: bot_message is deliberately NOT here — those are the agents' own posts.
@@ -265,6 +292,15 @@ TOOLS = [
     # Approvals queries are matched deterministically in think() (_parse_approvals_
     # query). As a tool it misfired on business questions — a pricing question was
     # answered with the approvals list — so the model no longer gets that choice.
+    #
+    # `remember` STAYS in this list, but the model does not get to decide whether it
+    # RUNS — see _tool_vetoed. Removing the entry was tried first and made things
+    # worse: MEASURED on pricing questions with conversation memory seeded, the
+    # misfire simply moved to the next tool (read_channel: 6/10 in one sample, 1/10
+    # in another; with the entry present, 0/10 and 1/10). The model wants *a* tool
+    # for a pricing question and will even invent one (`display_pricing`,
+    # `get_pricing`, `retrieve_pricing` all appeared) — so pruning the list just
+    # reshuffles which wrong tool it grabs. Deciding is Python's job, not the list's.
     {"name": "remember",
      "description": ("Save a durable business fact the team should know (milestone, "
                      "launch, policy change). Use when told to remember/note it."),
@@ -285,6 +321,30 @@ TOOLS = [
              "approvals), or text to summarize."}},
          "required": ["channel_or_text"]}},
 ]
+
+# The model may call ONLY what it was offered. tool_handlers is deliberately wider
+# (it still holds check_pending_approvals for the deterministic route), so the
+# handler dict cannot be used as the permission check — a hallucinated name would
+# find a live handler and run it. MEASURED: asked for pricing, the model invented
+# `display_pricing`, `get_pricing` and `retrieve_pricing`, none of which exist.
+_MODEL_TOOL_NAMES = {t["name"] for t in TOOLS}
+
+
+def _tool_vetoed(name, user_text):
+    """True if the model proposed a tool that PYTHON refuses to run for this
+    utterance. Principle 1: the model may classify and propose; code decides.
+
+    `remember` is the one that matters (Bug A). MEASURED: "give me the pricing
+    tiers" — a plain question with no remember phrasing anywhere — made the model
+    emit <tool_call>{"name": "remember", ...}, which writes a fabricated "fact"
+    into docs/memory.md AND leaves the question unanswered. "Should this be saved?"
+    has a right answer, so the gate is the same deterministic matcher the fast path
+    uses: no explicit "remember/note that X" in what the user actually SAID, no
+    write. Ever. (In practice that veto is absolute — an utterance that does match
+    is handled deterministically at the top of think() and never reaches the model
+    — which is precisely the point: the model cannot reach this write path at all.)
+    """
+    return name == "remember" and not _parse_remember(user_text)
 
 
 class Aria:
@@ -398,19 +458,45 @@ class Aria:
         messages += (conversation_history or [])
         messages.append({"role": "user", "content": user_text})
 
+        def _generate(predict=num_predict, extra_system=None):
+            msgs = messages + ([{"role": "system", "content": extra_system}]
+                               if extra_system else [])
+            return strip_reasoning(call_hermes(msgs, model=model,
+                                               num_predict=predict,
+                                               keep_alive=keep_alive))
+
         tool_calls, dispatched = [], False
-        reply = strip_reasoning(call_hermes(messages, model=model, num_predict=num_predict, keep_alive=keep_alive))
+        recovered = False   # at most ONE recovery regeneration per turn
+        reply = _generate()
         for _ in range(6):  # bounded tool-call loop
             call = parse_tool_call(reply)
             if not call:
+                # Bug A: a tool call cut off mid-JSON by num_predict parses as
+                # nothing, so the raw syntax would fall through and be SPOKEN.
+                # Give it room to finish once; the strip below is the backstop.
+                if looks_like_tool_syntax(reply) and not recovered:
+                    recovered = True
+                    reply = _generate(predict=_TOOL_CALL_NUM_PREDICT)
+                    continue
                 break
             name = call.get("name")
+            if name not in _MODEL_TOOL_NAMES or _tool_vetoed(name, user_text):
+                # Either a tool the model was never offered (it invents them —
+                # `display_pricing`, `get_pricing`), or one Python refuses to run
+                # for this utterance (`remember` on a question — Bug A). Do NOT
+                # execute it, and don't drop the turn either: ask once for a plain
+                # answer, which is what the user actually wanted.
+                print(f"[aria] refused tool call {name!r} "
+                      f"(offered={name in _MODEL_TOOL_NAMES})")
+                if not recovered:
+                    recovered = True
+                    reply = _generate(extra_system=_PLAIN_TEXT_DIRECTIVE)
+                    continue
+                reply = ""      # -> EMPTY_REPLY_FALLBACK below
+                break
             tool_calls.append(call)
             if name == "dispatch_to_agent":
                 dispatched = True
-            if name not in self.tool_handlers:
-                reply = f"(skipped unknown tool {name})"
-                break
             result = self.tool_handlers[name](call.get("arguments", {}) or {})
             # Fix #3 — structured tools speak their Python-formatted result
             # verbatim; the model never rephrases it (no fabrication). The same
@@ -430,8 +516,15 @@ class Aria:
             messages.append({"role": "assistant", "content": reply})
             messages.append({"role": "tool",
                              "content": json.dumps({"name": name, "content": str(result)})})
-            reply = strip_reasoning(call_hermes(messages, model=model, num_predict=num_predict, keep_alive=keep_alive))
+            reply = _generate()
 
+        # Bug A — whatever happened above, no tool syntax leaves this function. If
+        # the loop gave up on an unparseable call, this is what stops the JSON from
+        # reaching the TTS. Bug C — a reply that strips to nothing becomes an
+        # audible fallback; silence reads as a crash.
+        reply = strip_tool_syntax(reply)
+        if not reply.strip():
+            reply = EMPTY_REPLY_FALLBACK
         return {"reply": reply, "tool_calls": tool_calls, "dispatched": dispatched}
 
     # --- Tools --------------------------------------------------------------

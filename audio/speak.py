@@ -13,6 +13,7 @@ import numpy as np
 import sounddevice as sd
 
 import config
+from brain.speech import speakable
 
 SAMPLE_RATE = 24000
 OUTPUT_FORMAT = "pcm_24000"
@@ -36,9 +37,13 @@ def speak(text, voice_id=None):
     voice_id selects the ElevenLabs voice; when None (or empty) it defaults to
     ARIA's ELEVENLABS_VOICE_ID. Per-agent conversation replies pass the agent's
     voice here so each teammate speaks in their own voice.
+
+    Every caller lands here, so this is where speech cleaning belongs (Bug B/C):
+    Slack markup, emoji codes and snake_case ids become speakable prose, and text
+    that cleans away to nothing becomes an audible fallback rather than silence.
+    Placing it any further up would let some future caller skip it.
     """
-    if not text:
-        return False
+    text = speakable(text)
     client = _client_or_none()
     if client is None:
         print("[speak] ELEVENLABS_API_KEY missing — cannot speak.")
