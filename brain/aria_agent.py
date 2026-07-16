@@ -31,7 +31,7 @@ from brain.hermes_common import (call_hermes, parse_tool_call, tools_block,
                                  looks_like_tool_syntax)
 from brain.speech import EMPTY_REPLY_FALLBACK
 from agents.base_agent import strip_reasoning
-from integrations import slack_bus
+from integrations import slack_bus, web_search
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ARIA_PROMPT_PATH = Path(PROJECT_ROOT) / "aria_system_prompt.md"
@@ -198,38 +198,83 @@ def _parse_approvals_query(text):
     return any(rx.search(text or "") for rx in _APPROVALS_RES)
 
 
-# A request for a capability ARIA does NOT have — the open web, the internet,
-# browser tabs, web search. She must decline at the boundary, not reach for the
-# nearest tool. MEASURED: "pull up the air quality index in New Jersey in a separate
-# tab" made the model call read_channel and read back an unrelated message 4/4 (it
-# grabs whatever tool it has when it can't do what was asked — same class as the
-# pricing->remember misfire). Handled deterministically so the model never gets the
-# chance (Principle 1). Matches the CAPABILITY words (browser/tab/internet/search/
-# URL), never topic words, so "what's our pricing" is untouched.
-_WEB_REQUEST_RES = [
-    re.compile(r"\bbrowsers?\b", re.IGNORECASE),
+# --- Browser/app control: genuinely cannot do -> decline ---------------------
+# Opening tabs, driving a browser, launching apps. Search can't do these, so ARIA
+# declines that part. Kept SEPARATE from web-search intent below: a lookup phrased
+# "... in a separate tab" still gets searched, with a note that the tab can't be
+# opened; a PURE control request ("open a new tab") gets a clean decline.
+_BROWSER_CONTROL_RES = [
+    re.compile(r"\bin\s+(?:a\s+)?(?:new\s+|separate\s+|another\s+)?tab\b", re.IGNORECASE),
     re.compile(r"\b(?:new|separate|another)\s+tab\b", re.IGNORECASE),
-    re.compile(r"\b(?:open|pull\s+up|bring\s+up|in)\b.{0,25}\btab\b", re.IGNORECASE),
-    re.compile(r"https?://|\bwww\.", re.IGNORECASE),
-    re.compile(r"\b[a-z0-9][a-z0-9-]*\.(?:com|org|net|io|gov|edu|co|ai)\b", re.IGNORECASE),
-    re.compile(r"\bweb\s*search\b|\bsearch\s+(?:the\s+)?(?:web|internet|online)\b",
+    re.compile(r"\b(?:open|close|switch\s+to)\b.{0,20}\btab\b", re.IGNORECASE),
+    re.compile(r"\bbrowser\b", re.IGNORECASE),
+    re.compile(r"\bopen\s+(?:the\s+)?(?:app|application|program|window)\b", re.IGNORECASE),
+    re.compile(r"\b(?:launch|start|run)\s+(?:the\s+)?[\w-]+\s+app\b", re.IGNORECASE),
+]
+_BROWSER_DECLINE = "I can't open browser tabs or control apps, sir."
+
+
+def _parse_browser_control(text):
+    """True if `text` asks ARIA to drive a browser/app (open tabs, launch apps) —
+    something a web search cannot do."""
+    return any(rx.search(text or "") for rx in _BROWSER_CONTROL_RES)
+
+
+# --- Web-search intent: current/external info -> search ----------------------
+# Phrasing that wants live/external information ARIA can look up: "look up X",
+# "search for X", weather/air-quality, "price of X", "what's happening with X",
+# "current/latest/today's X". Distinct from dispatch/channel/status routing (which
+# runs BEFORE this and is re-checked as a collision guard — we've had misroutes at
+# exactly these boundaries), so "what's the latest from Bobby" never becomes a web
+# search and "what's in #ads" never does either.
+_WEB_SEARCH_RES = [
+    re.compile(r"\blook\s+(?:\w+\s+){0,2}up\b", re.IGNORECASE),   # look up / look it up
+    re.compile(r"\bsearch\s+(?:for|the\s+web|online|the\s+internet)\b", re.IGNORECASE),
+    re.compile(r"\bgoogle\b|\bweb\s*search\b", re.IGNORECASE),
+    re.compile(r"\bweather\b|\bforecast\b|\btemperature\b", re.IGNORECASE),
+    re.compile(r"\bair\s+quality\b|\bAQI\b", re.IGNORECASE),
+    re.compile(r"\bwhat'?s?\s+happening\s+(?:with|in|to|around)\b", re.IGNORECASE),
+    re.compile(r"\b(?:current|currently|latest|today'?s|right\s+now)\b", re.IGNORECASE),
+    re.compile(r"\bprice\s+of\b|\bstock\s+price\b|\bshare\s+price\b|\bexchange\s+rate\b",
                re.IGNORECASE),
-    re.compile(r"\bsearch\b.{0,30}\bonline\b", re.IGNORECASE),
-    re.compile(r"\b(?:on|from|off)\s+the\s+(?:web|internet)\b|\bthe\s+internet\b",
+    re.compile(r"\bnews\s+(?:about|on)\b|\blatest\s+news\b", re.IGNORECASE),
+    re.compile(r"\bpull\s+up\b.{0,40}\b(?:index|price|weather|quality|news|score|rate|forecast)\b",
                re.IGNORECASE),
-    re.compile(r"\bgoogle\b|\bbing\b|\bduck\s*duck\s*go\b", re.IGNORECASE),
-    re.compile(r"\bbrowse\b|\bweb\s*page\b|\bweb\s*site\b", re.IGNORECASE),
-    re.compile(r"\blook\b.{0,20}\bup\b.{0,30}\b(?:online|web|internet)\b", re.IGNORECASE),
 ]
 
-_CAPABILITY_DECLINE = (
-    "I don't have web access, sir — I can't open browser tabs or search the "
-    "internet. I can only work with the team and our own Slack channels.")
+# Phrases stripped from the raw utterance to leave a clean search query.
+_QUERY_STRIP_RES = [
+    re.compile(r"\bin\s+(?:a\s+)?(?:new\s+|separate\s+|another\s+)?tab\b", re.IGNORECASE),
+    re.compile(r"\b(?:in|on)\s+(?:a\s+)?(?:the\s+)?browser\b", re.IGNORECASE),
+    re.compile(r"^\s*(?:hey\s+jarvis[\s,]*)?(?:can|could|would)\s+you\s+", re.IGNORECASE),
+    re.compile(r"^\s*(?:hey\s+jarvis[\s,]*)?please\s+", re.IGNORECASE),
+    re.compile(r"\b(?:pull\s+up|bring\s+up|open\s+up|look\s+(?:\w+\s+){0,2}up|"
+               r"search\s+(?:the\s+web\s+)?for|search\s+for|google|find\s+me)\b",
+               re.IGNORECASE),
+]
 
 
-def _parse_web_request(text):
-    """True if `text` asks for a web/browser/internet capability ARIA lacks."""
-    return any(rx.search(text or "") for rx in _WEB_REQUEST_RES)
+def _search_query(text):
+    """Strip lookup/browser framing to leave a clean query for the search API.
+    Falls back to the whole utterance if stripping leaves nothing."""
+    q = text or ""
+    for rx in _QUERY_STRIP_RES:
+        q = rx.sub(" ", q)
+    q = re.sub(r"\s+", " ", q).strip(" ?.!,")
+    return q or (text or "").strip()
+
+
+def _parse_web_search(text):
+    """Return a cleaned search query if `text` wants current/external info, else
+    None. Never fires on a dispatch/channel/status/approvals query — those are
+    handled first and re-checked here so a web search can't hijack them."""
+    t = text or ""
+    if not any(rx.search(t) for rx in _WEB_SEARCH_RES):
+        return None
+    if (_parse_dispatch(t) or _parse_status_query(t) or _parse_channel_query(t)
+            or _parse_approvals_query(t) or _has_channel_intent(t)):
+        return None                      # it's a team/channel query, not a web search
+    return _search_query(t)
 
 
 # The ONLY context in which the model may run read_channel: text that plausibly
@@ -476,14 +521,6 @@ class Aria:
                                     "arguments": {"agent_name": agent.capitalize(), "task": task}}],
                     "dispatched": True}
 
-        # Capability boundary — a web/browser/internet request is something ARIA
-        # cannot do. Decline deterministically BEFORE the model, so it can never
-        # answer by dumping a random channel instead (measured 4/4). Checked ahead of
-        # the channel/status routes so "open #ads in a new tab" declines rather than
-        # reading the channel — she still can't open a tab.
-        if _parse_web_request(user_text):
-            return {"reply": _CAPABILITY_DECLINE, "tool_calls": [], "dispatched": False}
-
         # Deterministic status query ("what did Bobby find") — read that agent's
         # channel directly, no model call, so it can never fabricate.
         agent = _parse_status_query(user_text)
@@ -512,6 +549,22 @@ class Aria:
             return {"reply": self._read_channel({"channel_name": ckey}), "dispatched": False,
                     "tool_calls": [{"name": "read_channel", "arguments": {"channel_name": ckey}}],
                     "memory_note": _relay_channel_note(ckey)}
+
+        # Web search (Level 1) — a question needing current/external info. Checked
+        # AFTER the team routes so a channel/status query can never land here. A
+        # lookup phrased "... in a tab" is still searched, with a note that the tab
+        # itself can't be opened; a PURE browser/app-control request declines.
+        squery = _parse_web_search(user_text)
+        browser = _parse_browser_control(user_text)
+        if squery is not None:
+            answer = self._web_search(squery)
+            if browser and answer != web_search.COULDNT_FIND:
+                answer = "I can't open browser tabs, but I looked it up for you, sir. " + answer
+            return {"reply": answer, "dispatched": False,
+                    "tool_calls": [{"name": "web_search", "arguments": {"query": squery}}],
+                    "memory_note": f"(looked up: {squery[:48]})"}
+        if browser:
+            return {"reply": _BROWSER_DECLINE, "tool_calls": [], "dispatched": False}
 
         # Garbled / unintelligible very-short input that matched no route — ask the
         # user to repeat rather than free-associating a hallucinated answer (Bug 2).
@@ -702,6 +755,48 @@ class Aria:
         if not items:
             return "No pending approvals."
         return f"You have {len(items)} pending: " + "; ".join(items) + "."
+
+    def _web_search(self, query):
+        """Search the web and return a GROUNDED spoken answer (Level 1).
+
+        Principle 1: Python fetches and caps the result; gemma3 narrates only that,
+        guarded so it can't add facts; and any failure — no key, no network (the TLS
+        flaps), empty results — returns a clean 'couldn't find', never a guess."""
+        result = web_search.search(query)
+        if not result:
+            return web_search.COULDNT_FIND
+        return self._narrate_search(query, result)
+
+    def _narrate_search(self, query, result):
+        """Have gemma3 read the search result in ARIA's voice — then verify it added
+        no numeric fact the result doesn't contain. If it did (or came back empty),
+        speak the grounded answer directly instead."""
+        grounding = result["grounding"]
+        system = (
+            "You are ARIA, reading a web search result to the user out loud. Narrate "
+            "ONLY the information in the SEARCH RESULT below, in one or two short "
+            "spoken sentences, in your own concise voice (address him as 'sir'). Do "
+            "NOT add any fact, number, place, or date that is not in the result, and "
+            "do NOT use your own prior knowledge — it may be out of date. If the "
+            "result doesn't clearly answer the question, say you couldn't find a "
+            f"clear answer.\n\nSEARCH RESULT:\n{grounding}")
+        narration = strip_tool_syntax(strip_reasoning(call_hermes(
+            [{"role": "system", "content": system},
+             {"role": "user", "content": query}],
+            model=self.model, num_predict=120, keep_alive="30m"))).strip()
+        if not narration or web_search.narration_fabricates(narration, grounding):
+            return self._grounded_fallback(result)
+        return narration
+
+    def _grounded_fallback(self, result):
+        """A guaranteed-grounded spoken answer with no model in the loop: the
+        Python-extracted value if we have one, else Tavily's own summarized answer,
+        else a clean decline. Used when the narration can't be trusted."""
+        if result.get("value"):
+            return f"From what I found, {result['value']}, sir."
+        if result.get("answer"):
+            return f"Here's what I found, sir: {result['answer']}"
+        return web_search.COULDNT_FIND
 
     def _remember(self, args):
         """Save a business-memory fact to docs/memory.md. Python writes the

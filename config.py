@@ -47,6 +47,13 @@ def _get_set(name, default):
 SLACK_BOT_TOKEN = os.environ.get("SLACK_BOT_TOKEN", "")
 SLACK_APP_TOKEN = os.environ.get("SLACK_APP_TOKEN", "")  # Socket Mode (used later)
 
+# --- Web search (ARIA Level 1) ----------------------------------------------
+# Tavily (tavily.com) — built for LLM use, returns a pre-summarized `answer`
+# plus clean result snippets, which suits gemma3. 1000 free searches/month.
+# Empty -> web search is unavailable and ARIA declines gracefully ("couldn't
+# find that, sir"), never fabricates. Put the key in .env, never in code.
+TAVILY_API_KEY = os.environ.get("TAVILY_API_KEY", "")
+
 # --- Voice / TTS (ARIA — Step 6) --------------------------------------------
 ELEVENLABS_API_KEY = os.environ.get("ELEVENLABS_API_KEY")
 ELEVENLABS_VOICE_ID = os.environ.get("ELEVENLABS_VOICE_ID")
