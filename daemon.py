@@ -88,11 +88,39 @@ sarah, tom, ava, bobby = Sarah(), Tom(), Ava(), Bobby()
 
 
 def _post_ops(text):
-    """Post a short line to #ops. Never raises — logs if it can't."""
+    """Post a short line to #ops. Never raises — logs if it can't. A network blip
+    while posting is itself a self-healing transient (WARNING); any other failure
+    means alerting is actually broken (ERROR)."""
     try:
         slack_bus.post_as("daemon", ":gear:", config.CHANNELS["ops"], text)
-    except Exception:
-        logger.error("Failed to post to #ops:\n%s", traceback.format_exc())
+    except Exception as e:
+        if slack_bus.is_transient_network_error(e):
+            logger.warning("Couldn't reach #ops (network unreachable: %s); "
+                           "alert not sent.", type(e).__name__)
+        else:
+            logger.error("Failed to post to #ops:\n%s", traceback.format_exc())
+
+
+def _report_cycle_failure(label, exc):
+    """Log an exception from a scheduled cycle or approval poll, choosing severity
+    by CAUSE rather than treating every failure as a crash.
+
+    A pre-send transient that exhausted its bounded retries — an SSL handshake flap
+    or a DNS/network-down blip — is something the next cycle recovers from on its
+    own (measured: 242 clean polls to 5 such blips in one day). It is logged at
+    WARNING with no #ops alert, so the dashboard's error list stays reserved for
+    real problems. A genuinely unexpected exception keeps the ERROR + traceback +
+    red #ops alert. This changes ONLY logging severity — the recovery behaviour
+    (return, let the scheduler run the next cycle) is identical either way.
+    """
+    if slack_bus.is_transient_network_error(exc):
+        logger.warning("%s: network unreachable (%s) — nothing was sent to Slack; "
+                       "will retry next cycle.", label, type(exc).__name__)
+        return
+    tb = traceback.format_exc()
+    logger.error("%s crashed:\n%s", label, tb)
+    last = tb.strip().splitlines()[-1] if tb.strip() else "unknown error"
+    _post_ops(f":rotating_light: `{label}` failed: {last}")
 
 
 def run_job(label, fn):
@@ -101,11 +129,8 @@ def run_job(label, fn):
     try:
         fn()
         logger.info("Finished %s", label)
-    except Exception:
-        tb = traceback.format_exc()
-        logger.error("Job %s crashed:\n%s", label, tb)
-        last = tb.strip().splitlines()[-1] if tb.strip() else "unknown error"
-        _post_ops(f":rotating_light: `{label}` failed: {last}")
+    except Exception as e:
+        _report_cycle_failure(label, e)
 
 
 def poll_approvals():
@@ -119,11 +144,8 @@ def poll_approvals():
             for item in agent.process_pending_approvals():
                 logger.info("approval [%s] %s -> %s",
                             agent.name, item.get("payload_id"), item.get("status"))
-        except Exception:
-            tb = traceback.format_exc()
-            logger.error("Approval poll for %s crashed:\n%s", agent.name, tb)
-            _post_ops(f":rotating_light: approval poll for `{agent.name}` failed: "
-                      f"{tb.strip().splitlines()[-1]}")
+        except Exception as e:
+            _report_cycle_failure(f"approval poll for {agent.name}", e)
 
 
 # --- Startup dependency guard: wait for Ollama ------------------------------

@@ -60,6 +60,18 @@ def _is_pre_send_transient(exc):
                             ConnectionRefusedError))
 
 
+def is_transient_network_error(exc):
+    """Public: True if `exc` is a pre-send connection/TLS/DNS failure — exactly the
+    class _call retries and that the next cycle recovers from on its own (an SSL
+    handshake flap, DNS not resolving, connection refused).
+
+    Lets a caller (the daemon) log a self-healing network blip as a WARNING instead
+    of a red-alert ERROR without re-deriving the exception taxonomy. This only READS
+    the same classification the retry uses — it does not change what gets retried.
+    """
+    return _is_pre_send_transient(exc)
+
+
 def _call(label, fn, **kwargs):
     """Invoke a Slack API call, retrying only pre-send transient failures."""
     for attempt in range(1, _RETRY_ATTEMPTS + 1):
