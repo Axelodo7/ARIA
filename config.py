@@ -81,6 +81,14 @@ WHISPER_MODEL_SIZE = os.environ.get("WHISPER_MODEL_SIZE", "small.en")
 # re-opening the mic, so residual speaker audio isn't captured as the next turn.
 POST_TTS_MUTE_MS = int(_get_float("POST_TTS_MUTE_MS", 500))
 
+# --- Follow-up window (ARIA) ------------------------------------------------
+# After ARIA speaks a reply, the mic stays open this long for a follow-up so you
+# don't have to say "hey Jarvis" again. VAD-gated: it waits for you to START
+# speaking within the window (silence just returns to wake-word/idle), and each real
+# follow-up reopens the window so a back-and-forth flows naturally. Set to 0 to
+# disable and require the wake word every turn.
+FOLLOWUP_WINDOW_SECONDS = _get_float("FOLLOWUP_WINDOW_SECONDS", 12)
+
 # --- Global run mode --------------------------------------------------------
 # DRY_RUN defaults to True: no consequential action executes for real unless
 # this is explicitly turned off. Write operations to Slack are logged instead

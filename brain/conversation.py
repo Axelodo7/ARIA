@@ -54,9 +54,16 @@ def _normalize(text):
 
 # Exit phrases — matched ONLY when they ARE the whole (normalized) message, so an
 # exit word inside longer speech ("thanks for the update, but ...") is NOT an exit.
+# The natural sign-offs ("thank you", "that'll be all", ...) matter most for the
+# FOLLOW-UP window (classify_followup), which honours an exit before treating a
+# short phrase as noise. Conversation mode still checks the hallucination set first
+# (classify_turn), so adding these here doesn't change when it exits.
 _EXIT_PHRASES = {_normalize(p) for p in (
     "thanks", "thanks that's all", "that's all", "we're done", "back to aria",
-    "goodbye", "thanks that is all", "we are done", "bye")}
+    "goodbye", "thanks that is all", "we are done", "bye",
+    "thank you", "thank you sir", "thanks sir", "that'll be all",
+    "that will be all", "that is all", "no that's all", "nothing else",
+    "that's it", "that's all for now", "all done", "we're good", "i'm done")}
 
 
 def detect_open(text):
@@ -145,6 +152,85 @@ def classify_turn(text, duration_sec, recent_agent_speech=None):
     if is_exit(text):
         return "exit"
     return "message"
+
+
+# --- Follow-up window (audio-free driver; main.py supplies capture + handle) --
+# After ARIA speaks, the mic stays open for a short window so a follow-up needs no
+# wake word. classify_followup differs from classify_turn in ORDER: it honours an
+# EXIT phrase before the noise checks, because here the user WANTS "thank you" /
+# "that's all" to end the session, and a false exit only drops to idle (harmless).
+# A garbled/empty capture is 'noise' — ignored, the window stays open — so a stray
+# sound never fires a turn (uses the same _looks_unintelligible guard as the wake
+# path). ARIA's own speech heard back is 'echo', ignored the same way.
+def classify_followup(text, recent_agent_speech=None):
+    """'exit' | 'echo' | 'noise' | 'message' for a captured follow-up."""
+    from brain.aria_agent import _looks_unintelligible  # lazy: avoid an import cycle
+    if not text or not text.strip():
+        return "noise"
+    if is_exit(text):
+        return "exit"
+    if is_echo(text, recent_agent_speech):
+        return "echo"
+    if is_silence_hallucination(text) or _looks_unintelligible(text):
+        return "noise"
+    return "message"
+
+
+# Consecutive noise/echo captures before the window gives up and returns to idle —
+# so a persistently noisy room can't hold the mic open forever.
+MAX_FOLLOWUP_NOISE = 3
+
+
+def run_followup_window(capture, handle, should_stop=None, logger=None,
+                        max_noise=MAX_FOLLOWUP_NOISE, initial_recent=None):
+    """Drive the post-reply follow-up window until it ends. Audio-free and testable.
+
+      capture()  -> (text, got_speech). got_speech False means the VAD window timed
+                    out with no speech onset (silence) — return to idle. True means
+                    speech was captured and transcribed to `text`.
+      handle(text) -> the spoken reply (str) or None. Routes/answers/persists one
+                    continued turn exactly as a wake-word turn would; the returned
+                    reply is tracked so ARIA's own voice heard back counts as echo.
+      should_stop() truthy -> shut down.
+
+    Returns a named reason (never exits silently). Each real turn RESETS the window
+    (natural back-and-forth); silence, an exit phrase, or too much consecutive noise
+    ends it and the caller returns to wake-word/idle.
+    """
+    # Seed with the reply that opened the window (the wake-word turn's answer) so
+    # ARIA's own voice heard back on the FIRST follow-up capture counts as echo.
+    recent = deque([r for r in (initial_recent or ()) if r], maxlen=3)
+    consecutive_noise = 0
+    while not (should_stop and should_stop()):
+        text, got_speech = capture()
+        if not got_speech:
+            reason = "no follow-up (window elapsed in silence)"
+            break
+        kind = classify_followup(text, recent)
+        if kind == "exit":
+            reason = "user exit phrase"
+            break
+        if kind in ("noise", "echo"):
+            consecutive_noise += 1
+            note = (f"  (follow-up ignored {kind} {text!r}; "
+                    f"{consecutive_noise}/{max_noise})")
+            print(note)
+            if logger:
+                logger.info(note.strip())
+            if consecutive_noise >= max_noise:
+                reason = f"too much {kind} ({consecutive_noise} in a row)"
+                break
+            continue                    # keep the window open
+        consecutive_noise = 0
+        reply = handle(text)            # continued turn — speaks its own reply
+        if reply:
+            recent.append(reply)
+    else:
+        reason = "stop signal (shutdown)"
+    print(f"  [follow-up window closed] {reason}")
+    if logger:
+        logger.info("[FOLLOW-UP CLOSED: %s]", reason)
+    return reason
 
 
 # --- Turn-loop driver (audio-free; main.py supplies capture + speak) ----------

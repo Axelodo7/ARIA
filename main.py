@@ -72,27 +72,18 @@ def main():
     aria = Aria(hud_hook=hud.set_state)
     stop = threading.Event()
 
-    def run_turn():
-        """One full exchange. Any exception is caught by the loop guard."""
-        hud.set_state("listening")
-        speak.play_wav(ACK_WAV)                 # instant cached "Yes?"
-        audio = record.record_until_silence()   # stops when you go quiet
+    mute_sec = config.POST_TTS_MUTE_MS / 1000.0
 
-        hud.set_state("thinking")
-        text = transcribe.transcribe(audio)
-        if not text.strip():
-            hud.set_state("speaking")
-            speak.speak("I didn't catch that, sir.")
-            return
-        print(f"  you : {text}")
-        logger.info("user: %s", text)
-
+    def handle_utterance(text):
+        """Route one utterance: open a conversation, or answer + speak + persist.
+        Returns ARIA's spoken reply (so the follow-up window can treat her own voice
+        heard back as echo), or None for conversation mode."""
         # Conversation mode? (deterministic; dispatch phrases don't match these,
         # so "ask Bobby about X" still dispatches normally via think().)
         opened = conversation.detect_open(text)
         if opened:
             conversation_mode(*opened)
-            return
+            return None
 
         result = aria.think(text)               # deterministic routing or model
         reply = result.get("reply", "")
@@ -111,8 +102,37 @@ def main():
         # the model a template it then reuses for unrelated questions.
         conv_memory.record_turn(SESSION_ID, "user", text)
         conv_memory.record_turn(SESSION_ID, "aria", result.get("memory_note") or reply)
+        return reply
 
-    mute_sec = config.POST_TTS_MUTE_MS / 1000.0
+    def run_turn():
+        """The wake-word turn: ack, record until silence, then handle. Returns
+        ARIA's reply (seeds the follow-up window's echo guard), or None."""
+        hud.set_state("listening")
+        speak.play_wav(ACK_WAV)                 # instant cached "Yes?"
+        audio = record.record_until_silence()   # stops when you go quiet
+
+        hud.set_state("thinking")
+        text = transcribe.transcribe(audio)
+        if not text.strip():
+            hud.set_state("speaking")
+            speak.speak("I didn't catch that, sir.")
+            return None
+        print(f"  you : {text}")
+        logger.info("user: %s", text)
+        return handle_utterance(text)
+
+    def capture_followup():
+        """One VAD-gated follow-up capture inside the window. Returns
+        (text, got_speech): got_speech False when the window elapses in silence, so
+        the loop returns to wake-word/idle. A short post-TTS mute first lets ARIA's
+        own speaker tail settle so it isn't captured as a follow-up."""
+        time.sleep(mute_sec)
+        hud.set_state("listening")
+        audio, got_speech = record.record_followup(config.FOLLOWUP_WINDOW_SECONDS)
+        if not got_speech:
+            return "", False
+        hud.set_state("thinking")
+        return transcribe.transcribe(audio), True
 
     def speak_then_mute(text, voice_id=None):
         """Speak (in `voice_id`, or ARIA's default when None), then stay muted
@@ -158,7 +178,18 @@ def main():
                 wake_word.listen_for_wake_word()   # blocks until triggered
                 if stop.is_set():
                     break
-                run_turn()
+                reply = run_turn()
+                # Follow-up window: after ARIA speaks, keep the mic open (VAD-gated)
+                # so a natural back-and-forth continues without the wake word. Each
+                # real follow-up reopens it; silence, an exit phrase, or a noisy room
+                # ends it and we drop back to wake-word/idle above.
+                if config.FOLLOWUP_WINDOW_SECONDS > 0 and not stop.is_set():
+                    conversation.run_followup_window(
+                        capture=capture_followup,
+                        handle=handle_utterance,
+                        should_stop=stop.is_set,
+                        logger=logger,
+                        initial_recent=[reply] if reply else None)
             except Exception:
                 logger.exception("per-turn error")
                 try:
