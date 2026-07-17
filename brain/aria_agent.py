@@ -277,6 +277,33 @@ def _parse_web_search(text):
     return _search_query(t)
 
 
+# --- Unit-conversion follow-up ("those numbers in Fahrenheit") ---------------
+# A pure conversion request — no fresh topic to search — must convert the LAST
+# search's values in PYTHON, not by model mental math. MEASURED: routed to the
+# model, "tell me those numbers in Fahrenheit" made it convert 30°C->86°F itself
+# (right by luck) AND invent a source ("the air quality readings from #feedback"),
+# because the ungrounded prompt still carries the tools block, which lists channel
+# names. A fresh weather/temperature query is caught by _parse_web_search ABOVE
+# (grounded search), so only the source-less follow-up reaches here.
+_UNIT_CONVERSION_RES = [
+    (re.compile(r"\bfahrenheit\b|\bin\s+°?\s*f\b|\bto\s+°?\s*f\b|\bdegrees?\s+f\b",
+                re.IGNORECASE), "F"),
+    (re.compile(r"\bcelsius\b|\bcentigrade\b|\bin\s+°?\s*c\b|\bto\s+°?\s*c\b|"
+                r"\bdegrees?\s+c\b", re.IGNORECASE), "C"),
+]
+
+
+def _parse_unit_conversion(text):
+    """Return the target unit ('F'/'C') if `text` is a temperature-unit conversion
+    request, else None. Checked AFTER _parse_web_search, so a fresh weather query
+    ('what's the weather in Fahrenheit') is searched rather than treated as a
+    conversion of nothing."""
+    for rx, unit in _UNIT_CONVERSION_RES:
+        if rx.search(text or ""):
+            return unit
+    return None
+
+
 # The ONLY context in which the model may run read_channel: text that plausibly
 # refers to a team channel or a teammate's posts. Every legitimate channel/status
 # query is already handled deterministically above (_parse_channel_query /
@@ -294,6 +321,23 @@ def _has_channel_intent(text):
     """True if `text` plausibly refers to a team channel or teammate's posts — the
     precondition for a model-driven read_channel."""
     return bool(_CHANNEL_INTENT_RE.search(text or ""))
+
+
+# A freeform answer that names a team channel it never read is a fabricated source
+# (the tools block lists channel names; the model grabs one to "source" a figure —
+# measured: a conversion follow-up cited "readings from #feedback"). A `#channel`
+# token or "the <name> channel" in a NON-relay reply is that tell; a real channel
+# read returns via the relay path and never reaches this check.
+_CITES_CHANNEL_RE = re.compile(
+    r"#[a-z][a-z0-9_-]+\b|\bthe\s+"
+    r"(?:feedback|support[- ]?intel|dev|content|ads|approvals|ops)\s+channel\b",
+    re.IGNORECASE)
+
+
+def _cites_channel(text):
+    """True if `text` names a team channel — used to catch a phantom source in an
+    ungrounded freeform reply."""
+    return bool(_CITES_CHANNEL_RE.search(text or ""))
 
 
 def _parse_status_query(text):
@@ -480,6 +524,11 @@ class Aria:
         # Whether dispatch actually fires the agent's --once cycle. True in
         # production; tests can set False to post-without-fire for verification.
         self.fire_cycles = True
+        # The most recent web-search result, kept so a conversion follow-up ("those
+        # numbers in Fahrenheit") can convert its values in Python rather than
+        # letting the model do mental math on remembered numbers. Session-scoped —
+        # one Aria instance handles consecutive turns in main.py.
+        self._last_search = None
         self.tool_handlers = {
             "dispatch_to_agent": self._dispatch_to_agent,
             "read_channel": self._read_channel,
@@ -563,6 +612,16 @@ class Aria:
             return {"reply": answer, "dispatched": False,
                     "tool_calls": [{"name": "web_search", "arguments": {"query": squery}}],
                     "memory_note": f"(looked up: {squery[:48]})"}
+
+        # Unit-conversion follow-up ("give me those in Fahrenheit") — convert the
+        # LAST search's values in PYTHON, deterministically, so the model never does
+        # mental math and can never invent a source. Declines cleanly if there's no
+        # prior figure. Checked after the search block so a fresh weather query is
+        # searched, not treated as a conversion of nothing.
+        conv_unit = _parse_unit_conversion(user_text)
+        if conv_unit:
+            return self._convert_last_search(conv_unit)
+
         if browser:
             return {"reply": _BROWSER_DECLINE, "tool_calls": [], "dispatched": False}
 
@@ -672,6 +731,18 @@ class Aria:
         # reaching the TTS. Bug C — a reply that strips to nothing becomes an
         # audible fallback; silence reads as a crash.
         reply = strip_tool_syntax(reply)
+
+        # Phantom-source guard: an ungrounded freeform answer must never attribute
+        # data to a team channel it did not read. No channel was read this turn (no
+        # tool call), yet the reply names one — the model sourced a figure from a
+        # channel name it saw in the tools block. Regenerate ONCE with the tools
+        # block removed (where those names live); taking it out of context is the
+        # fix that works on this model, not instructing against it.
+        if not tool_calls and _cites_channel(reply):
+            print("[aria] phantom channel source in freeform reply — regenerating "
+                  "without the tools block")
+            reply = _answer_without_tools()
+
         if not reply.strip():
             reply = EMPTY_REPLY_FALLBACK
         return {"reply": reply, "tool_calls": tool_calls, "dispatched": dispatched}
@@ -765,7 +836,31 @@ class Aria:
         result = web_search.search(query)
         if not result:
             return web_search.COULDNT_FIND
+        self._last_search = result       # so a conversion follow-up can reuse it
         return self._narrate_search(query, result)
+
+    def _convert_last_search(self, target_unit):
+        """Convert the LAST search's temperatures to `target_unit`, in Python, and
+        speak a deterministic grounded line — NO model call, so no mental math and no
+        invented source. If there's no prior figure to convert, decline; never guess.
+
+        This closes the follow-up fabrication: "give me those in Fahrenheit" used to
+        fall through to the model, which did the arithmetic itself and cited a
+        channel it never read. Now the number comes from Python converting the real
+        prior result, and the reply names no source at all."""
+        result = self._last_search
+        grounding = result["grounding"] if result else ""
+        values = web_search.temperatures_to_unit(grounding, target_unit)
+        reply = web_search.narrate_conversion(values, target_unit)
+        if not reply:
+            unit = "Fahrenheit" if target_unit.upper().startswith("F") else "Celsius"
+            return {"reply": f"I don't have a figure to convert to {unit}, sir — "
+                             "shall I look it up?",
+                    "tool_calls": [], "dispatched": False}
+        return {"reply": reply, "dispatched": False,
+                "tool_calls": [{"name": "convert_units",
+                                "arguments": {"to": target_unit}}],
+                "memory_note": f"(converted the last figures to {target_unit})"}
 
     def _narrate_search(self, query, result):
         """Have gemma3 read the search result in ARIA's voice — then verify it added

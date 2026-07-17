@@ -223,3 +223,60 @@ def narration_fabricates(narration, grounding):
         if not any(abs(v - gv) < 0.01 for gv in g):
             return True
     return False
+
+
+# --- Unit conversion (Principle 1: Python does the math, never the model) -----
+# A follow-up like "give me those in Fahrenheit" must NOT be answered by the model
+# doing mental math on the previous turn's numbers — that is arithmetic it wasn't
+# handed, the pattern that produces confident wrong values (and, measured, a
+# hallucinated "#feedback" source). So Python extracts the previous search's
+# temperatures and converts them itself, and the caller narrates the result
+# deterministically. A temperature needs an explicit C/F unit to be picked up, so a
+# bare AQI or rainfall figure is never mistaken for one.
+_TEMP_EXTRACT_RE = re.compile(
+    r"(-?\d{1,3}(?:\.\d+)?)\s*(?:°\s*|degrees?\s+|deg\s+)?"
+    r"(C|F|Celsius|Centigrade|Fahrenheit)\b", re.IGNORECASE)
+
+
+def extract_temperatures(text):
+    """Every temperature in `text` as (value, unit), unit normalised to 'C'/'F'."""
+    return [(float(m.group(1)), m.group(2)[0].upper())
+            for m in _TEMP_EXTRACT_RE.finditer(text or "")]
+
+
+def convert_temperature(value, from_unit, to_unit):
+    """Convert a single temperature between C and F. Same unit -> unchanged."""
+    f, t = from_unit.upper()[0], to_unit.upper()[0]
+    if f == t:
+        return value
+    if f == "C" and t == "F":
+        return value * 9 / 5 + 32
+    if f == "F" and t == "C":
+        return (value - 32) * 5 / 9
+    return value
+
+
+def temperatures_to_unit(text, target_unit):
+    """Every temperature in `text`, converted to target_unit, as de-duplicated
+    rounded ints in first-seen order. [] when there is nothing to convert."""
+    t = target_unit.upper()[0]
+    seen, out = set(), []
+    for value, unit in extract_temperatures(text):
+        conv = round(convert_temperature(value, unit, t))
+        if conv not in seen:
+            seen.add(conv)
+            out.append(conv)
+    return out
+
+
+def narrate_conversion(values, target_unit):
+    """A deterministic spoken line for converted temperatures — built in Python so
+    the model never touches it. None when there is nothing to say."""
+    if not values:
+        return None
+    unit = "Fahrenheit" if target_unit.upper().startswith("F") else "Celsius"
+    nums = [str(v) for v in values]
+    if len(nums) == 1:
+        return f"That's {nums[0]} degrees {unit}, sir."
+    body = f"{', '.join(nums[:-1])} and {nums[-1]}"
+    return f"Those are {body} degrees {unit}, sir."
