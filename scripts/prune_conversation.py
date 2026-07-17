@@ -46,6 +46,15 @@ _SUSPECT_RES = [
     # that a pricing question is answered with the approvals queue.
     re.compile(rf"{_NUM}\s+pending\s+(?:proposals?|approvals?|items?)", re.IGNORECASE),
     re.compile(r"\blist of .{0,20}pending\b", re.IGNORECASE),
+    # A stored LIVE-DATA READING (AQI / temperature / pollutant) is poison of the
+    # same kind: it was a fabricated or now-stale value, and once in memory the model
+    # cites it as fact for a later "what's the air quality" — the "78 ppm / 86°F"
+    # resurfacing bug. Live readings are ephemeral; they never belong in memory as an
+    # answer. (New ones can't get in — search replies are stored by reference — so
+    # this only surfaces pre-existing rows to remove.)
+    re.compile(r"\b\d+(?:\.\d+)?\s*(?:°\s*[fc]\b|°(?!\w)|degrees?\s+(?:f\b|c\b|"
+               r"fahrenheit|celsius)|ppm\b|µg\b|pm\s?2\.?5\b|pm\s?10\b)", re.IGNORECASE),
+    re.compile(rf"\b(?:air[\s-]?quality|aqi)\b[^.]{{0,25}}?{_NUM}", re.IGNORECASE),
 ]
 
 

@@ -314,6 +314,75 @@ def _parse_web_search(text):
     return _search_query(t)
 
 
+# --- Follow-up lookup ("what about X" right after a search) -------------------
+# A follow-up carries NO topic word, so _parse_web_search misses it and it falls to
+# the freeform model — where (measured) it declined web access AND surfaced stale
+# figures from conversation memory. When a live-data search just happened, a bare
+# "what about <place>" means "<place>, same topic". We re-issue a fresh grounded
+# search carrying the prior topic, so a follow-up looks up exactly like the original.
+_FOLLOWUP_RE = re.compile(
+    r"^\s*(?:and\s+|so\s+|ok(?:ay)?[\s,]+)?(?:what|how)\s+about\s+"
+    r"(?:in\s+|for\s+|the\s+)?(.+?)\s*[?.!]*$", re.IGNORECASE)
+# Topic words carried from the previous query onto the follow-up's subject.
+_CARRY_TOPIC_RE = re.compile(
+    r"\b(air quality|aqi|weather|forecast|temperature|humidity|pollen|uv index|"
+    r"price|stock|exchange rate|news)\b", re.IGNORECASE)
+# A follow-up subject that is a BUSINESS/team topic, not a place to look up — let it
+# answer from business context instead of becoming a spurious search ("what about
+# the pricing" must NOT become "pricing weather").
+_NONPLACE_FOLLOWUP_RE = re.compile(
+    r"\b(pricing|price|tier|cost|plan|discount|refund|revenue|budget|spend|roas|"
+    r"cpa|creative|proposal|approvals?|our\b|the team|the deal)\b", re.IGNORECASE)
+
+
+def _followup_search_query(text, last_query):
+    """A fresh search query for a 'what about X' follow-up to `last_query`, or None.
+    Carries the previous topic ('NJ weather' + 'what about South Brunswick' ->
+    'South Brunswick weather') so the follow-up is grounded the same way. Returns
+    None for a business/team follow-up (answered from context, not searched)."""
+    if not last_query:
+        return None
+    m = _FOLLOWUP_RE.match(text or "")
+    if not m:
+        return None
+    subject = m.group(1).strip().strip(" ?.!,")
+    if not subject or _has_channel_intent(subject) or _NONPLACE_FOLLOWUP_RE.search(subject):
+        return None
+    if _CARRY_TOPIC_RE.search(subject):
+        return subject                   # subject already names a topic — use as-is
+    tm = _CARRY_TOPIC_RE.search(last_query)
+    return f"{subject} {tm.group(1)}" if tm else subject
+
+
+# --- Ungrounded live-value backstop (the hard guarantee) ---------------------
+# A request for a CURRENT external reading (AQI, temperature, weather, a pollutant
+# level) must be grounded in a real search — never answered from the model's own
+# knowledge or from stale conversation memory. If such a claim reaches the freeform
+# finalize, NO search grounded it (the search path returns earlier), so the number
+# is a guess. MEASURED failures: "the AQI is currently 100" with no search, and
+# "AQI was 78 ppm, temp 86°F" resurfaced from poisoned memory. This catches the
+# CLAIM at the output regardless of which phrasing slipped routing, so fabrication
+# is impossible even when the matcher misses.
+_LIVE_TOPIC_RE = re.compile(
+    r"\b(?:air[\s-]?quality|aqi|weather|forecast|temperature|humidity|pollen|"
+    r"uv index|air pollution|wind chill|barometric)\b", re.IGNORECASE)
+# A reading UNIT attached to a number — a live measurement even with no topic word.
+_LIVE_UNIT_RE = re.compile(
+    r"\b\d+(?:\.\d+)?\s*(?:°\s*[fc]\b|°(?!\w)|degrees?\s+(?:f\b|c\b|fahrenheit|"
+    r"celsius)|ppm\b|µg\b|pm\s?2\.?5\b|pm\s?10\b)", re.IGNORECASE)
+_HAS_DIGIT_RE = re.compile(r"\d")
+
+
+def _asserts_live_value(text):
+    """True if `text` states a specific CURRENT external reading (a live-data topic
+    plus a number, or a bare reading unit like '86°F' / '78 ppm'). Used to block an
+    ungrounded guess on the freeform path."""
+    t = text or ""
+    if _LIVE_UNIT_RE.search(t):
+        return True
+    return bool(_LIVE_TOPIC_RE.search(t) and _HAS_DIGIT_RE.search(t))
+
+
 # --- Unit-conversion follow-up ("those numbers in Fahrenheit") ---------------
 # A pure conversion request — no fresh topic to search — must convert the LAST
 # search's values in PYTHON, not by model mental math. MEASURED: routed to the
@@ -576,11 +645,13 @@ class Aria:
         # Whether dispatch actually fires the agent's --once cycle. True in
         # production; tests can set False to post-without-fire for verification.
         self.fire_cycles = True
-        # The most recent web-search result, kept so a conversion follow-up ("those
-        # numbers in Fahrenheit") can convert its values in Python rather than
-        # letting the model do mental math on remembered numbers. Session-scoped —
-        # one Aria instance handles consecutive turns in main.py.
+        # The most recent web-search result + the query that produced it, kept so a
+        # conversion follow-up ("those numbers in Fahrenheit") can convert its values
+        # in Python, and a lookup follow-up ("what about South Brunswick") can search
+        # again carrying the same topic. Session-scoped — one Aria instance handles
+        # consecutive turns in main.py.
         self._last_search = None
+        self._last_search_query = None
         self.tool_handlers = {
             "dispatch_to_agent": self._dispatch_to_agent,
             "read_channel": self._read_channel,
@@ -656,6 +727,8 @@ class Aria:
         # lookup phrased "... in a tab" is still searched, with a note that the tab
         # itself can't be opened; a PURE browser/app-control request declines.
         squery = _parse_web_search(user_text)
+        if squery is None:               # a bare "what about X" follow-up to a search
+            squery = _followup_search_query(user_text, self._last_search_query)
         browser = _parse_browser_control(user_text)
         if squery is not None:
             answer = self._web_search(squery)
@@ -801,6 +874,22 @@ class Aria:
                   "without the tools block")
             reply = _answer_without_tools()
 
+        # Ungrounded live-value backstop (the hard guarantee): a current external
+        # reading (AQI, temperature, a pollutant level) reached the freeform finalize
+        # WITHOUT a search grounding it — so the number is the model's guess or a
+        # stale figure from memory. Never speak it. Search NOW and ground the answer
+        # (or decline via COULDNT_FIND); the result is remembered by reference so the
+        # raw value can't poison memory. This catches the claim whatever phrasing
+        # slipped routing — fabrication of a live reading is impossible here.
+        if not tool_calls and _asserts_live_value(reply):
+            print("[aria] ungrounded live-data claim on freeform path — grounding "
+                  "via search")
+            sq = _search_query(user_text)
+            grounded = self._web_search(sq)
+            return {"reply": grounded, "dispatched": False,
+                    "tool_calls": [{"name": "web_search", "arguments": {"query": sq}}],
+                    "memory_note": f"(looked up: {sq[:48]})"}
+
         if not reply.strip():
             reply = EMPTY_REPLY_FALLBACK
         return {"reply": reply, "tool_calls": tool_calls, "dispatched": dispatched}
@@ -917,6 +1006,7 @@ class Aria:
         guarded so it can't add facts; and any failure — no key, no network (the TLS
         flaps), empty results — returns a clean 'couldn't find', never a guess."""
         result = web_search.search(query)
+        self._last_search_query = query  # remembered for a lookup follow-up
         if not result:
             return web_search.COULDNT_FIND
         self._last_search = result       # so a conversion follow-up can reuse it
