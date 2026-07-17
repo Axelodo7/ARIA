@@ -3,14 +3,126 @@
 One place for the Ollama chat call, tool-call parsing, and the tools-block that
 teaches Hermes our tool-call format. Every persona (ARIA + the four agents)
 routes through here.
+
+call_haiku (below) is the ONE cloud path: ARIA's freeform general-assistant answers
+optionally run on Claude Haiku 4.5. Everything else — every agent cycle, all
+deterministic routing, conversation mode — stays on call_hermes / gemma3.
 """
+import logging
 import requests, json, re
 from datetime import datetime, timezone
 from pathlib import Path
 
 import config
 
+logger = logging.getLogger("aria.model")
+
 OLLAMA_URL = "http://localhost:11434/api/chat"
+
+# --- Anthropic (Claude Haiku) for ARIA's general-assistant path -------------
+ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
+ANTHROPIC_VERSION = "2023-06-01"
+_HAIKU_TIMEOUT = 30
+
+
+class HaikuUnavailable(Exception):
+    """Haiku could not answer this turn — no key, network down (the machine's TLS
+    flaps), rate limit, HTTP error, or an empty/malformed body. The caller catches
+    this and falls back to gemma3, so ARIA never goes silent because the cloud is."""
+
+
+def _to_anthropic(messages):
+    """Translate our {role: system|user|assistant|tool} message list into the
+    Anthropic shape: (list of system strings, list of user/assistant turns).
+
+    All system-role content becomes the Anthropic `system` parameter; the FIRST
+    system string is the stable, cacheable prefix (business context + persona +
+    tools) and the rest is volatile (conversation memory, date). A 'tool' turn
+    becomes a user turn — we use the text <tool_call> protocol, not native tool_use,
+    so a tool result is just more context. Adjacent same-role turns are merged and a
+    leading assistant turn is dropped, since Anthropic requires user-first
+    alternation."""
+    system_parts, turns = [], []
+    for m in messages:
+        role, content = m.get("role"), m.get("content", "")
+        if role == "system":
+            if content:
+                system_parts.append(content)
+            continue
+        role = "user" if role == "tool" else role
+        text = f"Tool result: {content}" if m.get("role") == "tool" else content
+        if turns and turns[-1]["role"] == role:
+            turns[-1]["content"] += "\n\n" + text
+        else:
+            turns.append({"role": role, "content": text})
+    while turns and turns[0]["role"] != "user":
+        turns.pop(0)
+    return system_parts, turns
+
+
+def _log_haiku_usage(usage, label="haiku"):
+    """Print the token accounting so caching can be verified: on the first call
+    with a given prefix cache_write is set and cache_read is 0; on later calls the
+    same prefix comes back as cache_read (billed ~10x cheaper)."""
+    print(f"[{label}] input={usage.get('input_tokens')} "
+          f"cache_read={usage.get('cache_read_input_tokens')} "
+          f"cache_write={usage.get('cache_creation_input_tokens')} "
+          f"output={usage.get('output_tokens')}")
+
+
+def call_haiku(messages, max_tokens=None, temperature=0.4, cache=True,
+               return_usage=False):
+    """Answer via Claude Haiku 4.5 (Anthropic Messages API). Returns the text (or
+    (text, usage) when return_usage). Raises HaikuUnavailable on ANY failure — the
+    caller falls back to gemma3.
+
+    Prompt caching: the stable system prefix (business context ~1750 tokens +
+    persona + tools, sent every call) is marked cache_control ephemeral, so repeated
+    reads bill at ~$0.10/MTok instead of ~$1/MTok. Volatile content (conversation
+    memory, the date, the user's turn) sits after the breakpoint and is never cached.
+    """
+    if not config.ANTHROPIC_API_KEY:
+        raise HaikuUnavailable("no ANTHROPIC_API_KEY")
+
+    system_parts, turns = _to_anthropic(messages)
+    system_blocks = []
+    for i, part in enumerate(system_parts):
+        block = {"type": "text", "text": part}
+        if cache and i == 0:            # cache the stable prefix only
+            block["cache_control"] = {"type": "ephemeral"}
+        system_blocks.append(block)
+    if not turns:                        # Anthropic requires a first user turn
+        turns = [{"role": "user", "content": ""}]
+
+    cap = config.HAIKU_MAX_TOKENS
+    payload = {"model": config.HAIKU_MODEL,
+               "max_tokens": min(max_tokens or cap, cap),
+               "temperature": temperature,
+               "messages": turns}
+    if system_blocks:
+        payload["system"] = system_blocks
+    headers = {"x-api-key": config.ANTHROPIC_API_KEY,
+               "anthropic-version": ANTHROPIC_VERSION,
+               "content-type": "application/json"}
+
+    try:
+        r = requests.post(ANTHROPIC_URL, json=payload, headers=headers,
+                          timeout=_HAIKU_TIMEOUT)
+    except requests.exceptions.RequestException as e:
+        raise HaikuUnavailable(f"network: {type(e).__name__}")
+    if r.status_code != 200:
+        raise HaikuUnavailable(f"http {r.status_code}")
+    try:
+        data = r.json()
+        text = "".join(b.get("text", "") for b in data.get("content", [])
+                       if b.get("type") == "text")
+        usage = data.get("usage", {}) or {}
+    except (ValueError, KeyError, TypeError) as e:
+        raise HaikuUnavailable(f"bad response: {type(e).__name__}")
+    _log_haiku_usage(usage)
+    if not text.strip():
+        raise HaikuUnavailable("empty content")
+    return (text, usage) if return_usage else text
 
 # Cap any Slack channel / tool result that feeds a prompt so no single prompt can
 # approach the context window. MEASURED: at 2000, Sarah's fallback run_turn prompt

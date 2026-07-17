@@ -164,6 +164,23 @@ AGENT_MODELS = {
     "ARIA_reasoning": "gemma3",
 }
 
+# --- ARIA general-assistant backend (Haiku, optional) -----------------------
+# ONE knob for which model answers ARIA's FREEFORM general-assistant path — general
+# knowledge, reasoning, and web-search result narration, the questions where gemma3
+# fumbles. "haiku" routes those (and only those) to Claude Haiku 4.5 via the
+# Anthropic API; "gemma3" keeps everything free and local. NOTHING else moves: the
+# scheduled agent cycles (Bobby/Sarah/Ava/Tom), the deterministic dispatch/approvals/
+# status/channel routing, conversation mode, the Tavily fetch + Python value
+# extraction, and Python unit conversion all stay on gemma3 / pure code regardless.
+# If "haiku" is set but the key is missing or the API is unreachable, each freeform
+# turn falls back to gemma3 (see call_haiku) — ARIA never goes silent.
+ARIA_GENERAL_MODEL = os.environ.get("ARIA_GENERAL_MODEL", "haiku").strip().lower()
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+HAIKU_MODEL = os.environ.get("HAIKU_MODEL", "claude-haiku-4-5-20251001")
+# Hard ceiling on tokens generated per Haiku call — a cost guard. ARIA's spoken
+# replies are short (the prompt enforces brevity), so this only caps a runaway.
+HAIKU_MAX_TOKENS = int(_get_float("HAIKU_MAX_TOKENS", 512))
+
 # --- Context window ---------------------------------------------------------
 # Phase 2: raise the context window from Ollama's 4096 default to 8192, passed in
 # options on every /api/chat call (more reliable than a separate Modelfile tag —

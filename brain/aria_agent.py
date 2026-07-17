@@ -25,7 +25,8 @@ from pathlib import Path
 
 import config
 from brain import conv_memory
-from brain.hermes_common import (call_hermes, parse_tool_call, tools_block,
+from brain.hermes_common import (call_hermes, call_haiku, HaikuUnavailable,
+                                 parse_tool_call, tools_block,
                                  business_context_block, cap_context,
                                  append_business_fact, strip_tool_syntax,
                                  looks_like_tool_syntax)
@@ -38,6 +39,42 @@ ARIA_PROMPT_PATH = Path(PROJECT_ROOT) / "aria_system_prompt.md"
 
 # Dispatch posts the task to the channel that teammate works from.
 _AGENT_CHANNELS = {"sarah": "feedback", "tom": "dev", "ava": "support_intel", "bobby": "ads"}
+
+# Guardrail reinforcement for the Haiku (general-assistant) path — the SAME rules
+# the deterministic guards enforce in code, stated to the model so the smarter
+# backend honours them by default rather than being caught after the fact. Injected
+# only on the Haiku path (gemma3's token budget is untouched), appended to the stable
+# system prefix so it is part of the cached block. That placement is also load-
+# bearing for cost: MEASURED, Claude Haiku 4.5's prompt-cache MINIMUM is ~4096 tokens
+# (3969 does not cache, 4182 does); business context + persona + tools is ~3950, just
+# under, so without this note the prefix would never cache. With it the prefix clears
+# the minimum and every repeated read bills ~10x cheaper. Genuine guidance, not
+# filler — it earns its place on both counts.
+_HAIKU_GROUNDING = """
+
+Operating rules for you as ARIA's general-assistant voice — these override any
+conflicting habit:
+- You are speaking OUT LOUD. Keep answers to one or two natural sentences unless
+  asked for more. No markdown, no bullet lists, no headings — this is spoken
+  dialogue, not a written report.
+- Ground every factual claim. State only what you actually know with confidence or
+  what the provided context and tool results contain. NEVER invent a number, name,
+  date, price, statistic, or source. If a specific figure was not given to you, do
+  not produce one — say you don't have it.
+- NEVER attribute information to a team channel (#feedback, #ads, #dev, #content,
+  #support-intel, #approvals, #ops) unless a tool result in THIS turn actually came
+  from that channel. Do not name a channel as a source from memory or as a guess —
+  inventing where data came from is as serious as inventing the data.
+- You cannot browse the web, open browser tabs, run searches yourself, or control
+  applications. When a web lookup is needed it is performed for you and handed to
+  you as a result to read; you only narrate what you were given, and you add nothing
+  that is not in it.
+- Do NOT do arithmetic the user is relying on — unit conversions and computed
+  figures are done in code and handed to you as facts; never recompute, convert, or
+  "correct" a number yourself.
+- If you do not know something and no provided context covers it, say so plainly. A
+  brief honest "I don't have that, sir" always beats a confident guess.
+- Address the user as "sir"."""
 
 # Tools whose output is STRUCTURED — ARIA speaks a Python-formatted version
 # verbatim rather than letting the fast model rephrase (and possibly fabricate).
@@ -338,6 +375,21 @@ def _cites_channel(text):
     """True if `text` names a team channel — used to catch a phantom source in an
     ungrounded freeform reply."""
     return bool(_CITES_CHANNEL_RE.search(text or ""))
+
+
+def _inject_haiku_grounding(messages):
+    """Append _HAIKU_GROUNDING to the FIRST system message (the stable prefix), so
+    it rides in the cached block. Returns a new list; the original is untouched (the
+    gemma3 fallback in the same turn must see the un-augmented prompt)."""
+    out, injected = [], False
+    for m in messages:
+        if not injected and m.get("role") == "system":
+            out.append({"role": "system",
+                        "content": (m.get("content") or "") + _HAIKU_GROUNDING})
+            injected = True
+        else:
+            out.append(m)
+    return out
 
 
 def _parse_status_query(text):
@@ -644,13 +696,20 @@ class Aria:
         # check_pending_approvals 3/3 with that ordering and 0/3 with this one.
         # Recent conversation also belongs closest to the user's message.
         def _build(with_tools=True):
-            prompt = (business_context_block()
+            # The STABLE prefix (business context + persona + tools) is one system
+            # message; the VOLATILE part (conversation memory + date) is the next.
+            # Order is unchanged from before — business, persona, tools, THEN conv
+            # memory (load-bearing: conv memory must follow the tools block, never
+            # split the persona from it). The split lets Haiku cache the stable
+            # prefix: call_haiku marks the FIRST system message cache_control.
+            stable = (business_context_block()
                       + (system_prompt or self.system_prompt)
-                      + (tools_block(TOOLS) if with_tools else "")
-                      + conv_memory.conversation_block())
+                      + (tools_block(TOOLS) if with_tools else ""))
+            volatile = (conv_memory.conversation_block()
+                        + f"Current date and time: {datetime.now():%A %Y-%m-%d %H:%M:%S}.")
             msgs = [
-                {"role": "system", "content": prompt},
-                {"role": "system", "content": f"Current date and time: {datetime.now():%A %Y-%m-%d %H:%M:%S}."},
+                {"role": "system", "content": stable},
+                {"role": "system", "content": volatile},
             ]
             msgs += (conversation_history or [])
             msgs.append({"role": "user", "content": user_text})
@@ -661,9 +720,8 @@ class Aria:
         def _generate(msgs=None, predict=num_predict, extra_system=None):
             m = (messages if msgs is None else msgs)
             m = m + ([{"role": "system", "content": extra_system}] if extra_system else [])
-            return strip_reasoning(call_hermes(m, model=model,
-                                               num_predict=predict,
-                                               keep_alive=keep_alive))
+            return self._assistant_call(m, num_predict=predict,
+                                        keep_alive=keep_alive, model=model)
 
         def _answer_without_tools():
             """Last resort for a refused tool call: regenerate with the tools block
@@ -827,6 +885,31 @@ class Aria:
             return "No pending approvals."
         return f"You have {len(items)} pending: " + "; ".join(items) + "."
 
+    def _assistant_call(self, messages, num_predict=None, keep_alive="30m",
+                        model=None, cache=True):
+        """The general-assistant model call — the ONE place ARIA's freeform answers
+        (general knowledge, reasoning, web-search narration) are generated.
+
+        Routes to Claude Haiku when ARIA_GENERAL_MODEL == 'haiku' AND a key is set;
+        otherwise gemma3. On ANY Haiku failure — no network (the TLS flaps), rate
+        limit, error — it falls back to gemma3 for this turn and logs why, so ARIA is
+        never silenced by the cloud being down. Every guardrail (fabrication guard,
+        phantom-source guard, speech cleaner, capability boundary) lives OUTSIDE this
+        call and applies to the result regardless of which model produced it.
+
+        Returns reasoning-stripped text (harmless on Haiku, which emits none)."""
+        if config.ARIA_GENERAL_MODEL == "haiku" and config.ANTHROPIC_API_KEY:
+            try:
+                msgs = _inject_haiku_grounding(messages) if cache else messages
+                return strip_reasoning(
+                    call_haiku(msgs, max_tokens=num_predict, cache=cache))
+            except HaikuUnavailable as e:
+                print(f"[aria] Haiku unavailable ({e}) — falling back to gemma3 "
+                      "for this turn")
+        return strip_reasoning(call_hermes(
+            messages, model=model or self.model,
+            num_predict=num_predict, keep_alive=keep_alive))
+
     def _web_search(self, query):
         """Search the web and return a GROUNDED spoken answer (Level 1).
 
@@ -875,10 +958,15 @@ class Aria:
             "do NOT use your own prior knowledge — it may be out of date. If the "
             "result doesn't clearly answer the question, say you couldn't find a "
             f"clear answer.\n\nSEARCH RESULT:\n{grounding}")
-        narration = strip_tool_syntax(strip_reasoning(call_hermes(
+        # Narration runs on the general-assistant backend (Haiku when configured,
+        # else gemma3), with fallback. cache=False: the grounding is different every
+        # call, so there is no stable prefix worth caching. The fabrication guard
+        # below is the SAME regardless of model — a smarter model still doesn't get
+        # to add a number the results don't contain.
+        narration = strip_tool_syntax(self._assistant_call(
             [{"role": "system", "content": system},
              {"role": "user", "content": query}],
-            model=self.model, num_predict=120, keep_alive="30m"))).strip()
+            num_predict=120, keep_alive="30m", cache=False)).strip()
         if not narration or web_search.narration_fabricates(narration, grounding):
             return self._grounded_fallback(result)
         return narration

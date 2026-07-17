@@ -28,6 +28,11 @@ except (AttributeError, ValueError):
     pass
 
 os.environ["DRY_RUN"] = "True"
+# Pin the general-assistant backend to gemma3: this test asserts the LOCAL
+# model's behaviour / phrasing (or measures its prompt_eval), so it must not
+# depend on whether ANTHROPIC_API_KEY is set. The Haiku path is covered by
+# scripts/test_haiku_path.py.
+os.environ["ARIA_GENERAL_MODEL"] = "gemma3"
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
